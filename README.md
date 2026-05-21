@@ -98,6 +98,34 @@ added.
 The easiest way to get the app ID for a window is to ask Niri with `niri msg
 windows`. Note that app IDs are case sensitive.
 
+### Scrolling anywhere on the bar to cycle windows
+
+You can enable `scroll_windows` to cycle through visible taskbar windows with
+the scroll wheel:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "scroll_windows": true,
+    "scroll_scope": "bar",
+    "scroll_wrap": false,
+    "scroll_reverse": false,
+  },
+}
+```
+
+Options:
+
+- `scroll_scope`: where scroll is captured. `"bar"` uses the full Waybar strip;
+  `"taskbar"` limits it to the taskbar module area.
+- `scroll_wrap`: whether scrolling past the end jumps back to the beginning.
+- `scroll_reverse`: reverses the scroll direction.
+
+This uses the taskbar's current visible window order and is intended for setups
+where you want to throw the cursor to the edge of the screen and scroll to
+switch windows.
+
 ### Multiple outputs
 
 By default, the taskbar will only show applications running on the same output

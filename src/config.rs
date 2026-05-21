@@ -13,6 +13,22 @@ pub struct Config {
     notifications: Notifications,
     #[serde(default)]
     show_all_outputs: bool,
+    #[serde(default)]
+    scroll_windows: bool,
+    #[serde(default)]
+    scroll_scope: ScrollScope,
+    #[serde(default)]
+    scroll_wrap: bool,
+    #[serde(default)]
+    scroll_reverse: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollScope {
+    Taskbar,
+    #[default]
+    Bar,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +114,22 @@ impl Config {
 
     pub fn show_all_outputs(&self) -> bool {
         self.show_all_outputs
+    }
+
+    pub fn scroll_windows(&self) -> bool {
+        self.scroll_windows
+    }
+
+    pub fn scroll_scope(&self) -> ScrollScope {
+        self.scroll_scope
+    }
+
+    pub fn scroll_wrap(&self) -> bool {
+        self.scroll_wrap
+    }
+
+    pub fn scroll_reverse(&self) -> bool {
+        self.scroll_reverse
     }
 }
 
