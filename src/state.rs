@@ -45,10 +45,13 @@ impl State {
     /// The returned sender can be used to inject additional events (for example, from Gtk signal
     /// handlers); the receiver yields all events in order. Dropping the receiver stops all of the
     /// event sources.
-    pub fn event_stream(&self) -> (Sender<Event>, Receiver<Event>) {
+    ///
+    /// `notifications` says whether this caller has any use for desktop notifications; the
+    /// workspaces widget doesn't, and there's no sense holding a D-Bus connection open for it.
+    pub fn event_stream(&self, notifications: bool) -> (Sender<Event>, Receiver<Event>) {
         let (tx, rx) = async_channel::unbounded();
 
-        if self.config().notifications_enabled() {
+        if notifications && self.config().notifications_enabled() {
             glib::spawn_future_local(notify_stream(tx.clone()));
         }
 

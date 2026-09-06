@@ -278,6 +278,55 @@ could be matched to them. The two are tracked separately, so a notification
 being dismissed doesn't clear urgency that Niri set, or the other way around.
 Focusing a window clears both, as there is no longer anything to point at.
 
+### Workspace switcher
+
+The same module can render a row of workspace buttons instead of the taskbar, so
+the two can share a look. Waybar loads a shared library once per module entry, so
+you add a second entry pointing at the same file and set its `mode`:
+
+```jsonc
+{
+  "modules-left": ["cffi/niri-workspaces"],
+  "modules-center": ["cffi/niri-taskbar"],
+
+  "cffi/niri-workspaces": {
+    "module_path": "/usr/lib/waybar/libniri_taskbar.so",
+    "mode": "workspaces",
+    "focus_indicator": true,
+    "hover_indicator": true,
+    "urgent_indicator": true,
+  },
+
+  "cffi/niri-taskbar": {
+    "module_path": "/usr/lib/waybar/libniri_taskbar.so",
+    // taskbar settings
+  },
+}
+```
+
+Each button is labelled with its workspace's name, or its index where it has no
+name, and clicking one focuses that workspace. Only the workspaces on the bar's
+own output are shown, unless `show_all_outputs` is set. The indicator options all
+work here too, with the sliding pill following the active workspace.
+
+The widget carries both the `niri-taskbar` and `niri-workspaces` style classes,
+so anything you have already written against `.niri-taskbar button` applies to
+workspace buttons as well, and `.niri-workspaces` lets you tell them apart:
+
+```css
+.niri-workspaces button {
+  padding: 0 10px;
+}
+```
+
+Buttons are given the `focused`, `active` and `urgent` classes, matching Niri's
+own idea of the focused workspace, the active workspace on each output, and
+whether anything on the workspace wants attention.
+
+This is a replacement for Waybar's built-in `niri/workspaces`, not an addition to
+it. That module is maintained as part of Waybar and keeps working across
+upgrades; this one is maintained here. Use whichever suits you.
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar

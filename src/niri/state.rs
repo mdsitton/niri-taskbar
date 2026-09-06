@@ -71,6 +71,13 @@ impl WindowSet {
                     }
                 }
             }
+            Event::WorkspaceUrgencyChanged { id, urgent } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.set_workspace_urgency(id, urgent);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WorkspaceUrgencyChanged event");
+                }
+            }
             Event::WindowUrgencyChanged { id, urgent } => {
                 if let Some(Inner::Ready(state)) = &mut self.0 {
                     state.set_window_urgency(id, urgent);
@@ -160,6 +167,14 @@ impl Niri {
             if focused {
                 ws.is_focused = activated;
             }
+        }
+    }
+
+    fn set_workspace_urgency(&mut self, id: u64, urgent: bool) {
+        if let Some(workspace) = self.workspaces.get_mut(&id) {
+            workspace.is_urgent = urgent;
+        } else {
+            tracing::warn!(id, urgent, "got urgency for unknown workspace");
         }
     }
 
@@ -277,11 +292,25 @@ pub struct Snapshot {
 pub struct WorkspaceInfo {
     pub id: u64,
     pub idx: u8,
+    /// The workspace's name, if it has been given one.
+    pub name: Option<String>,
     pub output: Option<String>,
     /// Whether this is the active workspace on its output.
     pub is_active: bool,
     /// Whether this is the focused workspace overall.
     pub is_focused: bool,
+    /// Whether anything on this workspace is asking for attention.
+    pub is_urgent: bool,
+}
+
+impl WorkspaceInfo {
+    /// What to put on a workspace button: its name if it has one, otherwise its index.
+    pub fn label(&self) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => self.idx.to_string(),
+        }
+    }
 }
 
 impl From<&Workspace> for WorkspaceInfo {
@@ -289,9 +318,11 @@ impl From<&Workspace> for WorkspaceInfo {
         Self {
             id: ws.id,
             idx: ws.idx,
+            name: ws.name.clone(),
             output: ws.output.clone(),
             is_active: ws.is_active,
             is_focused: ws.is_focused,
+            is_urgent: ws.is_urgent,
         }
     }
 }

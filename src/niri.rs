@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use niri_ipc::{Action, Output, Reply, Request, socket::Socket};
+use niri_ipc::{Action, Output, Reply, Request, WorkspaceReferenceArg, socket::Socket};
 pub use state::{Snapshot, Window};
 pub use window_stream::{Item as WindowStreamItem, WindowStream};
 
@@ -24,6 +24,15 @@ impl Niri {
     #[tracing::instrument(level = "TRACE", err)]
     pub fn activate_window(&self, id: u64) -> Result<(), Error> {
         let reply = request(Request::Action(Action::FocusWindow { id }))?;
+        reply::typed!(Handled, reply)
+    }
+
+    /// Requests that the given workspace ID should be focused.
+    #[tracing::instrument(level = "TRACE", err)]
+    pub fn focus_workspace(&self, id: u64) -> Result<(), Error> {
+        let reply = request(Request::Action(Action::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Id(id),
+        }))?;
         reply::typed!(Handled, reply)
     }
 

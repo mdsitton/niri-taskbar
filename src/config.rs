@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     notifications: Notifications,
     #[serde(default)]
+    mode: Mode,
+    #[serde(default)]
     show_all_outputs: bool,
     #[serde(default)]
     active_workspace_only: bool,
@@ -43,6 +45,15 @@ pub struct Config {
     scroll_wrap: bool,
     #[serde(default)]
     scroll_reverse: bool,
+}
+
+/// Which of the two widgets this module instance should render.
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Taskbar,
+    Workspaces,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +143,10 @@ impl Config {
 
     pub fn notifications_use_fuzzy_matching(&self) -> bool {
         self.notifications.use_fuzzy_matching
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     pub fn show_all_outputs(&self) -> bool {
