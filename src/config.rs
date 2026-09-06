@@ -24,6 +24,12 @@ pub struct Config {
     #[serde(default = "default_indicator_height")]
     focus_indicator_height: u32,
     #[serde(default)]
+    hover_indicator: bool,
+    #[serde(default = "default_hover_indicator_ms")]
+    hover_indicator_ms: u32,
+    #[serde(default = "default_indicator_height")]
+    hover_indicator_height: u32,
+    #[serde(default)]
     scroll_windows: bool,
     #[serde(default)]
     scroll_scope: ScrollScope,
@@ -146,6 +152,18 @@ impl Config {
         self.focus_indicator_height
     }
 
+    pub fn hover_indicator(&self) -> bool {
+        self.hover_indicator
+    }
+
+    pub fn hover_indicator_ms(&self) -> u32 {
+        self.hover_indicator_ms
+    }
+
+    pub fn hover_indicator_height(&self) -> u32 {
+        self.hover_indicator_height
+    }
+
     pub fn scroll_windows(&self) -> bool {
         self.scroll_windows
     }
@@ -179,6 +197,10 @@ where
 
 fn default_indicator_ms() -> u32 {
     180
+}
+
+fn default_hover_indicator_ms() -> u32 {
+    150
 }
 
 fn default_indicator_height() -> u32 {

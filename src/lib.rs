@@ -12,7 +12,7 @@ use async_channel::Sender;
 use button::Button;
 use config::{Config, ScrollScope};
 use error::Error;
-use indicator::Indicator;
+use indicator::{Indicator, Options as IndicatorOptions};
 use niri::{Snapshot, Window};
 use notify::EnrichedNotification;
 use output::Matcher;
@@ -334,10 +334,12 @@ struct Page {
     indicator: Option<Rc<Indicator>>,
 }
 
-/// A window button, along with the page it currently lives on.
+/// A window button, along with the page it currently lives on, and the hover tracking that page
+/// installed on it.
 struct Slot {
     button: Button,
     page: PageKey,
+    hover: Option<SignalHandlerId>,
 }
 
 struct Instance {
@@ -775,7 +777,14 @@ impl Instance {
                         if let Some(old) = self.pages.get(&slot.page) {
                             old.row.remove(slot.button.widget());
                         }
+                        if let Some(handler) = slot.hover.take() {
+                            slot.button.widget().disconnect(handler);
+                        }
                         page.row.add(slot.button.widget());
+                        slot.hover = page
+                            .indicator
+                            .as_ref()
+                            .map(|indicator| indicator.watch(slot.button.widget()));
                         slot.page = key;
                     }
                     slot
@@ -786,7 +795,15 @@ impl Instance {
                     // Implicitly adding the button widget to the page as we create it simplifies
                     // reordering, since it means we can just do it as we go.
                     page.row.add(button.widget());
-                    entry.insert(Slot { button, page: key })
+                    let hover = page
+                        .indicator
+                        .as_ref()
+                        .map(|indicator| indicator.watch(button.widget()));
+                    entry.insert(Slot {
+                        button,
+                        page: key,
+                        hover,
+                    })
                 }
             };
 
@@ -846,7 +863,7 @@ impl Instance {
                 let button = focused_window_id
                     .and_then(|id| self.buttons.get(&id))
                     .map(|slot| slot.button.widget().clone());
-                indicator.set_target(button.as_ref(), !page_changed);
+                indicator.set_focus(button.as_ref(), !page_changed);
             }
         }
 
@@ -882,11 +899,17 @@ impl Instance {
         let row = gtk::Box::new(Orientation::Horizontal, 0);
 
         let config = self.state.config();
-        let indicator = if config.focus_indicator() {
+        let indicator = if config.focus_indicator() || config.hover_indicator() {
             Some(Rc::new(Indicator::new(
                 &row,
-                config.focus_indicator_height(),
-                config.focus_indicator_ms(),
+                IndicatorOptions {
+                    focus: config.focus_indicator(),
+                    focus_height: config.focus_indicator_height(),
+                    focus_ms: config.focus_indicator_ms(),
+                    hover: config.hover_indicator(),
+                    hover_height: config.hover_indicator_height(),
+                    hover_ms: config.hover_indicator_ms(),
+                },
             )))
         } else {
             None

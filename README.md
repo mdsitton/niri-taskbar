@@ -217,6 +217,31 @@ properties, plus horizontal margins to inset it from the edges of the button:
 Because the pill shows which window is focused, you will usually want to drop
 whatever the `focused` class was doing to mark it before.
 
+A second pill can follow the pointer instead of the focus. It grows up from
+underneath the button and opens outwards from the middle, then retracts the same
+way when the pointer leaves:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "hover_indicator": true,
+    "hover_indicator_ms": 150,
+    "hover_indicator_height": 3,
+  },
+}
+```
+
+The two are independent, so either can be used without the other. The hover pill
+takes the same `indicator` styling, plus a `hover` class of its own, and is drawn
+underneath the focus pill where they overlap:
+
+```css
+.niri-taskbar .indicator.hover {
+  background-color: rgba(0, 240, 240, 0.35);
+}
+```
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar

@@ -5,7 +5,7 @@
 #   cd packaging && makepkg -sif
 pkgname=waybar-niri-taskbar-git
 _pkgname=niri-taskbar
-pkgver=r59.efbcda7
+pkgver=r60.d255fb7
 pkgver() {
   cd "$_pkgname"
   ( set -o pipefail
