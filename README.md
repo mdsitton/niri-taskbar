@@ -215,7 +215,11 @@ properties, plus horizontal margins to inset it from the edges of the button:
 ```
 
 Because the pill shows which window is focused, you will usually want to drop
-whatever the `focused` class was doing to mark it before.
+whatever the `focused` class was doing to mark it before. Watch out for rules
+elsewhere in your stylesheet while you do: many Waybar themes give every button
+an inset underline on hover, and removing the taskbar's own `box-shadow` lets
+that one through. Setting `box-shadow: none` on `.niri-taskbar button` and
+`.niri-taskbar button:hover` keeps it out of the way.
 
 A second pill can follow the pointer instead of the focus. It grows up from
 underneath the button and opens outwards from the middle, then retracts the same
