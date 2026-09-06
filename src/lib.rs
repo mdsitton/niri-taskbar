@@ -864,6 +864,8 @@ impl Instance {
                     .and_then(|id| self.buttons.get(&id))
                     .map(|slot| slot.button.widget().clone());
                 indicator.set_focus(button.as_ref(), !page_changed);
+                // Urgency can have changed without focus moving at all.
+                indicator.refresh();
             }
         }
 
@@ -899,21 +901,25 @@ impl Instance {
         let row = gtk::Box::new(Orientation::Horizontal, 0);
 
         let config = self.state.config();
-        let indicator = if config.focus_indicator() || config.hover_indicator() {
-            Some(Rc::new(Indicator::new(
-                &row,
-                IndicatorOptions {
-                    focus: config.focus_indicator(),
-                    focus_height: config.focus_indicator_height(),
-                    focus_ms: config.focus_indicator_ms(),
-                    hover: config.hover_indicator(),
-                    hover_height: config.hover_indicator_height(),
-                    hover_ms: config.hover_indicator_ms(),
-                },
-            )))
-        } else {
-            None
-        };
+        let indicator =
+            if config.focus_indicator() || config.hover_indicator() || config.urgent_indicator() {
+                Some(Rc::new(Indicator::new(
+                    &row,
+                    IndicatorOptions {
+                        focus: config.focus_indicator(),
+                        focus_height: config.focus_indicator_height(),
+                        focus_ms: config.focus_indicator_ms(),
+                        hover: config.hover_indicator(),
+                        hover_height: config.hover_indicator_height(),
+                        hover_ms: config.hover_indicator_ms(),
+                        urgent: config.urgent_indicator(),
+                        urgent_height: config.urgent_indicator_height(),
+                        urgent_pulse_ms: config.urgent_indicator_pulse_ms(),
+                    },
+                )))
+            } else {
+                None
+            };
 
         row.show();
         self.container.add_named(&row, &key.name());

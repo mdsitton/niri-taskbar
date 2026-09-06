@@ -242,6 +242,35 @@ underneath the focus pill where they overlap:
 }
 ```
 
+A third pill marks windows that want attention. Unlike the other two it is not
+limited to one button, since any number of windows can be asking at once, and it
+pulses rather than sitting still:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "urgent_indicator": true,
+    "urgent_indicator_height": 3,
+    "urgent_indicator_pulse_ms": 1200,
+  },
+}
+```
+
+`urgent_indicator_pulse_ms` is how long one breath takes. Set it to 0 for a pill
+that stays at full strength instead of pulsing. Every urgent pill pulses in step
+with the others. It takes the `indicator` styling plus an `urgent` class:
+
+```css
+.niri-taskbar .indicator.urgent {
+  background-color: #eb4d4b;
+}
+```
+
+Note that urgency comes from the notification support described below, so it
+only appears when `notifications` are enabled and a notification could be
+matched to a window.
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar

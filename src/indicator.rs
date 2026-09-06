@@ -15,7 +15,7 @@ use std::{
 use waybar_cffi::gtk::{
     self as gtk, CssProvider, StateFlags, StyleContext, cairo,
     glib::{ControlFlow, SignalHandlerId, Value, object::Cast, object::ObjectExt, value::ToValue},
-    prelude::{CssProviderExt, StyleContextExt, WidgetExt, WidgetExtManual},
+    prelude::{ContainerExt, CssProviderExt, StyleContextExt, WidgetExt, WidgetExtManual},
 };
 
 /// The default appearance, which a user stylesheet can override through
@@ -29,6 +29,10 @@ const DEFAULT_CSS: &[u8] = b"
 
 .indicator.hover {
   background-color: rgba(255, 255, 255, 0.45);
+}
+
+.indicator.urgent {
+  background-color: rgb(235, 77, 75);
 }
 ";
 
@@ -48,6 +52,18 @@ thread_local! {
 enum Kind {
     Focus,
     Hover,
+    Urgent,
+}
+
+impl Kind {
+    /// The extra style class this pill carries, alongside `indicator`.
+    fn class(self) -> Option<&'static str> {
+        match self {
+            Self::Focus => None,
+            Self::Hover => Some("hover"),
+            Self::Urgent => Some("urgent"),
+        }
+    }
 }
 
 /// How the indicators should behave, from the taskbar configuration.
@@ -59,6 +75,9 @@ pub struct Options {
     pub hover: bool,
     pub hover_height: u32,
     pub hover_ms: u32,
+    pub urgent: bool,
+    pub urgent_height: u32,
+    pub urgent_pulse_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +140,8 @@ struct Inner {
     focus: RefCell<Focus>,
     hover: RefCell<Hover>,
     hover_duration: Duration,
+    /// Fixed point the pulse is measured from, so every urgent pill throbs in step.
+    epoch: Instant,
     ticking: Cell<bool>,
     options: Options,
 }
@@ -234,7 +255,7 @@ impl Inner {
         })
     }
 
-    fn animating(&self) -> bool {
+    fn animating(&self, row: &gtk::Box) -> bool {
         let focus = self.focus.borrow();
         let focus_duration = Duration::from_millis(u64::from(self.options.focus_ms));
         let focus_running =
@@ -244,7 +265,26 @@ impl Inner {
         let hover_running =
             matches!(hover.started, Some(started) if started.elapsed() < self.hover_duration);
 
-        focus_running || hover_running
+        // The urgent pulse has no end of its own: it runs for as long as something is urgent.
+        // This is worked out from the row directly rather than from the last paint, because the
+        // tick is checked before the frame is drawn and would otherwise stop before the first
+        // paint had noticed anything.
+        let pulsing = self.options.urgent && self.options.urgent_pulse_ms > 0 && has_urgent(row);
+
+        focus_running || hover_running || pulsing
+    }
+
+    /// How opaque the urgent pill should be right now, easing between dim and full so it
+    /// breathes rather than blinking.
+    fn urgent_alpha(&self) -> f64 {
+        if self.options.urgent_pulse_ms == 0 {
+            return 1.0;
+        }
+
+        let period = f64::from(self.options.urgent_pulse_ms) / 1000.0;
+        let phase = (self.epoch.elapsed().as_secs_f64() / period) * std::f64::consts::TAU;
+
+        0.35 + 0.65 * (0.5 + 0.5 * phase.cos())
     }
 }
 
@@ -267,6 +307,7 @@ impl Indicator {
             focus: RefCell::new(Focus::default()),
             hover: RefCell::new(Hover::default()),
             hover_duration: Duration::from_millis(u64::from(options.hover_ms)),
+            epoch: Instant::now(),
             ticking: Cell::new(false),
             options,
         });
@@ -281,7 +322,8 @@ impl Indicator {
                 let cr = values.get(1).and_then(|v| v.get::<cairo::Context>().ok());
 
                 if let (Some(row), Some(cr)) = (row, cr) {
-                    // The hover pill goes down first, so the focus pill wins where they overlap.
+                    // Painted bottom to top, so the focus pill wins wherever they overlap.
+                    draw_urgent(&inner, &row, &cr);
                     draw(&inner, &row, &cr, Kind::Hover);
                     draw(&inner, &row, &cr, Kind::Focus);
                 }
@@ -305,7 +347,7 @@ impl Indicator {
         if !self.inner.options.focus {
             return;
         }
-        if self.inner.focus.borrow().button.as_ref() == button && !self.inner.animating() {
+        if self.inner.focus.borrow().button.as_ref() == button && !self.inner.animating(&self.row) {
             // Already settled in the right place, so there's nothing to do beyond the redraws
             // the row will ask for anyway.
             return;
@@ -372,6 +414,12 @@ impl Indicator {
         })
     }
 
+    /// Kicks the animation along after something that isn't focus or hover changed, such as a
+    /// window becoming urgent.
+    pub fn refresh(&self) {
+        self.wake();
+    }
+
     fn wake(&self) {
         wake(&self.row, &self.inner);
     }
@@ -382,6 +430,8 @@ fn draw(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context, kind: Kind) {
     let rect = with_class(row, kind, |context| match kind {
         Kind::Focus => inner.focus_rect(row, context),
         Kind::Hover => inner.hover_rect(row, context),
+        // Urgent is plural, so it goes through draw_urgent instead.
+        Kind::Urgent => None,
     });
 
     let Some(rect) = rect else {
@@ -397,6 +447,53 @@ fn draw(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context, kind: Kind) {
     });
 }
 
+/// Draws a pill under every urgent button, since any number of windows can be asking for
+/// attention at once.
+fn draw_urgent(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context) {
+    if !inner.options.urgent {
+        return;
+    }
+
+    let height = f64::from(inner.options.urgent_height);
+    let alpha = inner.urgent_alpha();
+
+    for child in row.children() {
+        let Ok(button) = child.downcast::<gtk::Button>() else {
+            continue;
+        };
+        if !button.style_context().has_class("urgent") {
+            continue;
+        }
+
+        let rect = with_class(row, Kind::Urgent, |context| {
+            inner.button_rect(Some(&button), row, context, height)
+        });
+        let Some(rect) = rect else {
+            continue;
+        };
+
+        with_class(row, Kind::Urgent, |context| {
+            // Drawn into a group so the pulse can fade the whole pill, including whatever
+            // border the stylesheet gave it, as one.
+            cr.push_group();
+            gtk::render_background(context, cr, rect.x, rect.y, rect.width, rect.height);
+            gtk::render_frame(context, cr, rect.x, rect.y, rect.width, rect.height);
+            if cr.pop_group_to_source().is_ok() {
+                let _ = cr.paint_with_alpha(alpha);
+            }
+        });
+    }
+}
+
+/// Whether any button in the row is currently asking for attention.
+fn has_urgent(row: &gtk::Box) -> bool {
+    row.children().into_iter().any(|child| {
+        child
+            .downcast::<gtk::Button>()
+            .is_ok_and(|button| button.style_context().has_class("urgent"))
+    })
+}
+
 /// Runs `f` with the indicator style classes temporarily applied to the row, so the pills can be
 /// styled from CSS without those classes ever affecting the row itself.
 fn with_class<T>(row: &gtk::Box, kind: Kind, f: impl FnOnce(&StyleContext) -> T) -> T {
@@ -404,8 +501,8 @@ fn with_class<T>(row: &gtk::Box, kind: Kind, f: impl FnOnce(&StyleContext) -> T)
 
     context.save();
     context.add_class("indicator");
-    if kind == Kind::Hover {
-        context.add_class("hover");
+    if let Some(class) = kind.class() {
+        context.add_class(class);
     }
 
     let result = f(&context);
@@ -428,7 +525,7 @@ fn wake(row: &gtk::Box, inner: &Rc<Inner>) {
     row.add_tick_callback(move |row, _clock| {
         row.queue_draw();
 
-        if inner.animating() {
+        if inner.animating(row) {
             ControlFlow::Continue
         } else {
             inner.ticking.set(false);

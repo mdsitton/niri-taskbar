@@ -30,6 +30,12 @@ pub struct Config {
     #[serde(default = "default_indicator_height")]
     hover_indicator_height: u32,
     #[serde(default)]
+    urgent_indicator: bool,
+    #[serde(default = "default_indicator_height")]
+    urgent_indicator_height: u32,
+    #[serde(default = "default_urgent_pulse_ms")]
+    urgent_indicator_pulse_ms: u32,
+    #[serde(default)]
     scroll_windows: bool,
     #[serde(default)]
     scroll_scope: ScrollScope,
@@ -164,6 +170,18 @@ impl Config {
         self.hover_indicator_height
     }
 
+    pub fn urgent_indicator(&self) -> bool {
+        self.urgent_indicator
+    }
+
+    pub fn urgent_indicator_height(&self) -> u32 {
+        self.urgent_indicator_height
+    }
+
+    pub fn urgent_indicator_pulse_ms(&self) -> u32 {
+        self.urgent_indicator_pulse_ms
+    }
+
     pub fn scroll_windows(&self) -> bool {
         self.scroll_windows
     }
@@ -201,6 +219,10 @@ fn default_indicator_ms() -> u32 {
 
 fn default_hover_indicator_ms() -> u32 {
     150
+}
+
+fn default_urgent_pulse_ms() -> u32 {
+    1200
 }
 
 fn default_indicator_height() -> u32 {
