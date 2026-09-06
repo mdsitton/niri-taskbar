@@ -14,6 +14,8 @@ pub struct Config {
     #[serde(default)]
     show_all_outputs: bool,
     #[serde(default)]
+    active_workspace_only: bool,
+    #[serde(default)]
     scroll_windows: bool,
     #[serde(default)]
     scroll_scope: ScrollScope,
@@ -114,6 +116,10 @@ impl Config {
 
     pub fn show_all_outputs(&self) -> bool {
         self.show_all_outputs
+    }
+
+    pub fn active_workspace_only(&self) -> bool {
+        self.active_workspace_only
     }
 
     pub fn scroll_windows(&self) -> bool {

@@ -685,10 +685,11 @@ impl Instance {
         let mut focused_window_id = None;
 
         let filter = self.filter.clone();
-        for window in windows
-            .iter()
-            .filter(|window| filter.should_show(window.output().unwrap_or_default()))
-        {
+        let active_workspace_only = self.state.config().active_workspace_only();
+        for window in windows.iter().filter(|window| {
+            filter.should_show(window.output().unwrap_or_default())
+                && (!active_workspace_only || window.workspace_is_active())
+        }) {
             visible_window_ids.push(window.id);
             if window.is_focused {
                 focused_window_id = Some(window.id);

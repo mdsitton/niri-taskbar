@@ -71,6 +71,13 @@ impl WindowSet {
                     }
                 }
             }
+            Event::WorkspaceActivated { id, focused } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.activate_workspace(id, focused);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WorkspaceActivated event");
+                }
+            }
             _ => {}
         }
 
@@ -128,6 +135,25 @@ impl Niri {
         niri.replace_windows(windows);
 
         niri
+    }
+
+    fn activate_workspace(&mut self, id: u64, focused: bool) {
+        // This mirrors niri_ipc's own event stream state handling: the activated workspace becomes
+        // the active one on its output, and (if focused) the focused workspace overall.
+        let Some(output) = self.workspaces.get(&id).map(|ws| ws.output.clone()) else {
+            tracing::warn!(id, "activated workspace is unknown");
+            return;
+        };
+
+        for ws in self.workspaces.values_mut() {
+            let activated = ws.id == id;
+            if ws.output == output {
+                ws.is_active = activated;
+            }
+            if focused {
+                ws.is_focused = activated;
+            }
+        }
     }
 
     fn remove_window(&mut self, id: u64) {
@@ -210,6 +236,7 @@ impl Niri {
             .map(|ww| Window {
                 window: ww.window.clone(),
                 output: ww.workspace.output.clone(),
+                workspace_is_active: ww.workspace.is_active,
             })
             .collect()
     }
@@ -222,11 +249,17 @@ pub type Snapshot = Vec<Window>;
 pub struct Window {
     window: NiriWindow,
     output: Option<String>,
+    workspace_is_active: bool,
 }
 
 impl Window {
     pub fn output(&self) -> Option<&str> {
         self.output.as_deref()
+    }
+
+    /// Whether the window's workspace is the active workspace on its output.
+    pub fn workspace_is_active(&self) -> bool {
+        self.workspace_is_active
     }
 }
 

@@ -148,6 +148,25 @@ mode). Note that multiple output support is still somewhat experimental, and may
 have some quirks. Please open an issue with your use case if it's not working as
 you expect!
 
+### Showing only the active workspace
+
+By default, the taskbar shows windows from every workspace on its output,
+ordered by workspace index. If you would rather it only show the workspace you
+are currently looking at, which more closely matches how Niri itself works,
+enable the `active_workspace_only` option:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "active_workspace_only": true,
+  },
+}
+```
+
+The taskbar updates as you switch workspaces. When combined with bar scrolling,
+only the windows on the active workspace are cycled through.
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar
