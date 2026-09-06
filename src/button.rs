@@ -1,4 +1,8 @@
-use std::{cell::RefCell, fmt::Debug, path::PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    fmt::Debug,
+    path::PathBuf,
+};
 
 use waybar_cffi::gtk::{
     self as gtk, Border, CssProvider, IconLookupFlags, IconSize, IconTheme, ReliefStyle,
@@ -14,6 +18,10 @@ pub struct Button {
     app_id: Option<String>,
     button: gtk::Button,
     state: State,
+    /// Attention asked for by a desktop notification, which sticks until the window is focused.
+    notified: Cell<bool>,
+    /// Attention asked for through Niri itself, which follows whatever Niri last told us.
+    niri_urgent: Cell<bool>,
 }
 
 impl Debug for Button {
@@ -73,6 +81,8 @@ impl Button {
             app_id,
             button,
             state,
+            notified: Cell::new(false),
+            niri_urgent: Cell::new(false),
         };
 
         // Set up our event handlers. It's easier to do this with self already available.
@@ -89,10 +99,14 @@ impl Button {
 
         if focus {
             context.add_class("focused");
-            context.remove_class("urgent");
+            // Looking at the window is taken as having dealt with whatever the notification was
+            // about. Niri's own urgency is left alone, since Niri clears that itself.
+            self.notified.set(false);
         } else {
             context.remove_class("focused");
         }
+
+        self.apply_urgency();
     }
 
     /// Sets the window title.
@@ -124,7 +138,29 @@ impl Button {
     /// This state is automatically cleared the next time the window is focused.
     #[tracing::instrument(level = "TRACE")]
     pub fn set_urgent(&self) {
-        self.button.style_context().add_class("urgent");
+        self.notified.set(true);
+        self.apply_urgency();
+    }
+
+    /// Records whether Niri considers this window to be asking for attention.
+    #[tracing::instrument(level = "TRACE")]
+    pub fn set_niri_urgent(&self, urgent: bool) {
+        self.niri_urgent.set(urgent);
+        self.apply_urgency();
+    }
+
+    /// Applies the union of the two sources of urgency, except while the window is focused, in
+    /// which case there is nothing left to draw attention to.
+    fn apply_urgency(&self) {
+        let context = self.button.style_context();
+        let urgent =
+            !context.has_class("focused") && (self.notified.get() || self.niri_urgent.get());
+
+        if urgent {
+            context.add_class("urgent");
+        } else {
+            context.remove_class("urgent");
+        }
     }
 
     /// Returns the actual [`gtk::Button`] widget.

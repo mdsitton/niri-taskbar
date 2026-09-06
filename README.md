@@ -267,9 +267,12 @@ with the others. It takes the `indicator` styling plus an `urgent` class:
 }
 ```
 
-Note that urgency comes from the notification support described below, so it
-only appears when `notifications` are enabled and a notification could be
-matched to a window.
+Urgency comes from two places, and either is enough to light the pill. Niri
+itself marks windows that ask for attention through the compositor, and the
+notification support described below marks windows whose desktop notifications
+could be matched to them. The two are tracked separately, so a notification
+being dismissed doesn't clear urgency that Niri set, or the other way around.
+Focusing a window clears both, as there is no longer anything to point at.
 
 ### Notifications
 

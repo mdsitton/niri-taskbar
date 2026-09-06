@@ -384,7 +384,12 @@ impl Instance {
 
         while let Ok(event) = rx.recv().await {
             match event {
-                Event::Notification(notification) => self.process_notification(notification).await,
+                Event::Notification(notification) => {
+                    self.process_notification(notification).await;
+                    // Marking a button urgent doesn't go through a snapshot, so the indicators
+                    // need telling that something changed.
+                    self.refresh_indicators();
+                }
                 Event::WindowSnapshot(windows) => {
                     self.maybe_retry_output_filter().await;
                     self.process_window_snapshot(windows);
@@ -807,8 +812,10 @@ impl Instance {
                 }
             };
 
-            // Update the window properties.
+            // Update the window properties. Focus goes first, since it decides whether there is
+            // any attention left to draw.
             slot.button.set_focus(window.is_focused);
+            slot.button.set_niri_urgent(window.is_urgent);
             slot.button.set_title(window.title.as_deref());
 
             // Ensure we don't remove this button from the container.
@@ -890,6 +897,15 @@ impl Instance {
 
         // Update the last snapshot.
         self.last_snapshot = Some(snapshot);
+    }
+
+    /// Nudges every page's indicator, for changes that don't arrive through a snapshot.
+    fn refresh_indicators(&self) {
+        for page in self.pages.values() {
+            if let Some(indicator) = &page.indicator {
+                indicator.refresh();
+            }
+        }
     }
 
     /// Returns the page for the given key, creating it if necessary.

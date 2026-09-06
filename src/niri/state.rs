@@ -71,6 +71,13 @@ impl WindowSet {
                     }
                 }
             }
+            Event::WindowUrgencyChanged { id, urgent } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.set_window_urgency(id, urgent);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WindowUrgencyChanged event");
+                }
+            }
             Event::WorkspaceActivated { id, focused } => {
                 if let Some(Inner::Ready(state)) = &mut self.0 {
                     state.activate_workspace(id, focused);
@@ -153,6 +160,14 @@ impl Niri {
             if focused {
                 ws.is_focused = activated;
             }
+        }
+    }
+
+    fn set_window_urgency(&mut self, id: u64, urgent: bool) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.is_urgent = urgent;
+        } else {
+            tracing::warn!(id, urgent, "got urgency for unknown window");
         }
     }
 
