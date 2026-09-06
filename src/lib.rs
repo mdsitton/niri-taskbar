@@ -27,7 +27,7 @@ use waybar_cffi::{
         gio,
         glib::{self, MainContext, Propagation, SignalHandlerId, object::Cast},
         prelude::{IsA, ObjectExt, WidgetExtManual},
-        traits::{BoxExt, ContainerExt, OverlayExt, StackExt, StyleContextExt, WidgetExt},
+        traits::{BoxExt, ContainerExt, StackExt, StyleContextExt, WidgetExt},
     },
     waybar_module,
 };
@@ -326,11 +326,10 @@ impl PageKey {
     }
 }
 
-/// One page of the taskbar stack: a row of buttons, with an optional focus indicator drawn on
-/// top of it.
+/// One page of the taskbar stack: a row of buttons, with an optional focus indicator painted
+/// over the top of them.
 #[derive(Clone)]
 struct Page {
-    overlay: gtk::Overlay,
     row: gtk::Box,
     indicator: Option<Rc<Indicator>>,
 }
@@ -847,7 +846,7 @@ impl Instance {
                 let button = focused_window_id
                     .and_then(|id| self.buttons.get(&id))
                     .map(|slot| slot.button.widget().clone());
-                indicator.set_target(&page.row, button.as_ref(), !page_changed);
+                indicator.set_target(button.as_ref(), !page_changed);
             }
         }
 
@@ -881,33 +880,22 @@ impl Instance {
         }
 
         let row = gtk::Box::new(Orientation::Horizontal, 0);
-        let overlay = gtk::Overlay::new();
-        overlay.add(&row);
 
         let config = self.state.config();
         let indicator = if config.focus_indicator() {
-            let indicator = Indicator::new(
+            Some(Rc::new(Indicator::new(
                 &row,
                 config.focus_indicator_height(),
                 config.focus_indicator_ms(),
-            );
-            overlay.add_overlay(indicator.widget());
-            // Without this the indicator would swallow clicks and scrolls meant for the buttons
-            // underneath it.
-            overlay.set_overlay_pass_through(indicator.widget(), true);
-            Some(Rc::new(indicator))
+            )))
         } else {
             None
         };
 
-        overlay.show_all();
-        self.container.add_named(&overlay, &key.name());
+        row.show();
+        self.container.add_named(&row, &key.name());
 
-        let page = Page {
-            overlay,
-            row,
-            indicator,
-        };
+        let page = Page { row, indicator };
         self.pages.insert(key, page.clone());
 
         page
@@ -936,7 +924,7 @@ impl Instance {
 
         for key in stale {
             if let Some(page) = self.pages.remove(&key) {
-                self.container.remove(&page.overlay);
+                self.container.remove(&page.row);
             }
         }
     }

@@ -1,8 +1,10 @@
 //! A pill that sits under the focused window's button and slides between buttons as the focus
 //! moves.
 //!
-//! This is drawn rather than packed into the taskbar, so it can sit at fractional positions
-//! between two buttons while it animates, and so it never disturbs the layout of the row.
+//! This is painted directly onto the row of buttons rather than being a widget of its own. That
+//! lets it sit at fractional positions between two buttons while it animates without disturbing
+//! the layout, and, since no widget is involved, there is nothing sitting over the buttons that
+//! could intercept clicks or scrolls.
 
 use std::{
     cell::{Cell, RefCell},
@@ -11,15 +13,15 @@ use std::{
 };
 
 use waybar_cffi::gtk::{
-    self as gtk, CssProvider, StateFlags, StyleContext,
-    glib::{ControlFlow, Propagation},
+    self as gtk, CssProvider, StateFlags, StyleContext, cairo,
+    glib::{ControlFlow, Value, object::ObjectExt, value::ToValue},
     prelude::{CssProviderExt, StyleContextExt, WidgetExt, WidgetExtManual},
 };
 
 /// The default appearance, which a user stylesheet can override through
 /// `.niri-taskbar .indicator`.
 const DEFAULT_CSS: &[u8] = b"
-* {
+.indicator {
   background-color: rgba(255, 255, 255, 0.85);
   border-radius: 999px;
   margin: 0 6px;
@@ -140,20 +142,17 @@ impl Inner {
 
 /// The focus indicator for a single taskbar page.
 pub struct Indicator {
-    area: gtk::DrawingArea,
+    row: gtk::Box,
     inner: Rc<Inner>,
 }
 
 impl Indicator {
-    /// Creates an indicator that tracks buttons within the given row.
+    /// Creates an indicator that tracks the buttons within the given row, painting itself over
+    /// the top of them.
     pub fn new(row: &gtk::Box, height: u32, duration_ms: u32) -> Self {
-        let area = gtk::DrawingArea::new();
-        area.set_can_focus(false);
-
-        let context = area.style_context();
-        context.add_class("indicator");
         INDICATOR_CSS_PROVIDER.with(|provider| {
-            context.add_provider(provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+            row.style_context()
+                .add_provider(provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         });
 
         let inner = Rc::new(Inner {
@@ -164,40 +163,63 @@ impl Indicator {
             height: f64::from(height),
         });
 
-        area.connect_draw({
+        // Connecting after the default handler means we paint once the buttons have been drawn,
+        // so the pill lands on top of them. gtk-rs only exposes the before variant of the draw
+        // signal, hence going through the generic signal machinery here.
+        row.connect_local("draw", true, {
             let inner = Rc::clone(&inner);
-            let row = row.clone();
-            move |area, cr| {
-                let context = area.style_context();
-                if let Some(rect) = inner.rect(&row, &context) {
-                    gtk::render_background(&context, cr, rect.x, rect.y, rect.width, rect.height);
-                    gtk::render_frame(&context, cr, rect.x, rect.y, rect.width, rect.height);
+            move |values: &[Value]| {
+                let row = values.first().and_then(|v| v.get::<gtk::Box>().ok());
+                let cr = values.get(1).and_then(|v| v.get::<cairo::Context>().ok());
+
+                if let (Some(row), Some(cr)) = (row, cr) {
+                    let context = row.style_context();
+
+                    // Styling comes from the `indicator` class, which is only in play while we
+                    // draw, so it never affects the row itself.
+                    context.save();
+                    context.add_class("indicator");
+                    if let Some(rect) = inner.rect(&row, &context) {
+                        gtk::render_background(
+                            &context,
+                            &cr,
+                            rect.x,
+                            rect.y,
+                            rect.width,
+                            rect.height,
+                        );
+                        gtk::render_frame(&context, &cr, rect.x, rect.y, rect.width, rect.height);
+                    }
+                    context.restore();
                 }
 
-                Propagation::Proceed
+                // Carry on propagating, so we don't interfere with anything else drawing.
+                Some(false.to_value())
             }
         });
 
-        Self { area, inner }
-    }
-
-    /// The widget to add to the page overlay.
-    pub fn widget(&self) -> &gtk::DrawingArea {
-        &self.area
+        Self {
+            row: row.clone(),
+            inner,
+        }
     }
 
     /// Points the pill at the given button, sliding from wherever it currently is.
     ///
     /// Pass `animate` as false to move it without animating, which is what you want when the
     /// page itself is sliding, or when the pill wasn't visible to begin with.
-    pub fn set_target(&self, row: &gtk::Box, button: Option<&gtk::Button>, animate: bool) {
+    pub fn set_target(&self, button: Option<&gtk::Button>, animate: bool) {
         if self.inner.target.borrow().as_ref() == button && !self.inner.animating() {
             // Already settled in the right place, so there's nothing to do beyond the redraws
             // the row will ask for anyway.
             return;
         }
 
-        let previous = self.inner.rect(row, &self.area.style_context());
+        let context = self.row.style_context();
+        context.save();
+        context.add_class("indicator");
+        let previous = self.inner.rect(&self.row, &context);
+        context.restore();
 
         *self.inner.target.borrow_mut() = button.cloned();
 
@@ -213,7 +235,7 @@ impl Indicator {
         }
 
         self.start_tick();
-        self.area.queue_draw();
+        self.row.queue_draw();
     }
 
     /// Drives redraws for the length of the animation, then stops so we're not waking up for
@@ -224,8 +246,8 @@ impl Indicator {
         }
 
         let inner = Rc::clone(&self.inner);
-        self.area.add_tick_callback(move |area, _clock| {
-            area.queue_draw();
+        self.row.add_tick_callback(move |row, _clock| {
+            row.queue_draw();
 
             if inner.animating() {
                 ControlFlow::Continue
