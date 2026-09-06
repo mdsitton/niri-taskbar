@@ -4,12 +4,13 @@ use std::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
+use async_channel::Sender;
 use button::Button;
 use config::{Config, ScrollScope};
 use error::Error;
-use futures::StreamExt;
 use niri::{Snapshot, Window};
 use notify::EnrichedNotification;
 use output::Matcher;
@@ -20,10 +21,10 @@ use waybar_cffi::{
     Module,
     gtk::{
         self, Orientation,
-        gdk::{EventMask, EventScroll, ScrollDirection},
+        gdk::{self, EventMask, EventScroll, ScrollDirection},
         gio,
-        glib::{MainContext, Propagation, object::Cast},
-        prelude::{IsA, WidgetExtManual},
+        glib::{self, MainContext, Propagation, SignalHandlerId, object::Cast},
+        prelude::{IsA, ObjectExt, WidgetExtManual},
         traits::{BoxExt, ContainerExt, StyleContextExt, WidgetExt},
     },
     waybar_module,
@@ -49,7 +50,9 @@ static TRACING: LazyLock<()> = LazyLock::new(|| {
     }
 });
 
-struct TaskbarModule {}
+struct TaskbarModule {
+    task: Option<glib::JoinHandle<()>>,
+}
 
 impl Module for TaskbarModule {
     type Config = Config;
@@ -58,22 +61,36 @@ impl Module for TaskbarModule {
         // Ensure tracing-subscriber is initialised.
         *TRACING;
 
-        let module = Self {};
         let state = State::new(config);
 
         let context = MainContext::default();
-        if let Err(e) = context.block_on(init(info, state)) {
-            tracing::error!(%e, "Niri taskbar module init failed");
-        }
+        let task = match context.block_on(init(info, state)) {
+            Ok(task) => Some(task),
+            Err(e) => {
+                tracing::error!(%e, "Niri taskbar module init failed");
+                None
+            }
+        };
 
-        module
+        Self { task }
+    }
+}
+
+impl Drop for TaskbarModule {
+    fn drop(&mut self) {
+        // Waybar destroys and recreates bars as outputs come and go, so make sure the instance
+        // task (and, through it, the Niri event stream thread) actually stops rather than
+        // lingering on and updating a widget that is no longer shown.
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
 waybar_module!(TaskbarModule);
 
 #[tracing::instrument(level = "DEBUG", skip_all, err)]
-async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<(), Error> {
+async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<glib::JoinHandle<()>, Error> {
     // Set up the box that we'll use to contain the actual window buttons.
     let root = info.get_root_widget();
     let container = gtk::Box::new(Orientation::Horizontal, 0);
@@ -85,9 +102,10 @@ async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<(), Error> {
 
     // We need to spawn a task to receive the window snapshots and update the container.
     let context = MainContext::default();
-    context.spawn_local(async move { Instance::new(state, container, scroll_state).task().await });
+    let task = context
+        .spawn_local(async move { Instance::new(state, container, scroll_state).task().await });
 
-    Ok(())
+    Ok(task)
 }
 
 #[derive(Default)]
@@ -137,7 +155,12 @@ fn install_scroll_handler<W: IsA<gtk::Widget> + Clone + 'static>(
         }
         ScrollScope::Bar => {
             let installed = Arc::new(AtomicBool::new(false));
-            try_install_bar_scroll_handler(root, state.clone(), scroll_state.clone(), installed.clone());
+            try_install_bar_scroll_handler(
+                root,
+                state.clone(),
+                scroll_state.clone(),
+                installed.clone(),
+            );
 
             let state_clone = state.clone();
             let scroll_state_clone = scroll_state.clone();
@@ -184,7 +207,9 @@ fn connect_scroll_handler<W: IsA<gtk::Widget>>(
     scroll_state: Arc<Mutex<ScrollState>>,
 ) {
     widget.add_events(EventMask::SCROLL_MASK | EventMask::SMOOTH_SCROLL_MASK);
-    widget.connect_scroll_event(move |_, event| handle_bar_scroll_event(&state, &scroll_state, event));
+    widget.connect_scroll_event(move |_, event| {
+        handle_bar_scroll_event(&state, &scroll_state, event)
+    });
 }
 
 fn handle_bar_scroll_event(
@@ -266,9 +291,21 @@ fn handle_bar_scroll_event(
     Propagation::Stop
 }
 
+/// How long to wait before retrying the output match after an attempt that couldn't determine
+/// which output the bar is on.
+const OUTPUT_FILTER_RETRY: Duration = Duration::from_secs(2);
+
+/// How long after startup to re-check the output match. Gdk may not yet know which monitor the
+/// bar is on when the module is first initialised, so an early match can be wrong.
+const OUTPUT_FILTER_RECHECK: Duration = Duration::from_secs(2);
+
 struct Instance {
     buttons: BTreeMap<u64, Button>,
     container: gtk::Box,
+    display_handlers: Vec<(gdk::Display, SignalHandlerId)>,
+    filter: output::Filter,
+    filter_matched: bool,
+    last_filter_attempt: Option<Instant>,
     last_snapshot: Option<Snapshot>,
     scroll_state: Arc<Mutex<ScrollState>>,
     state: State,
@@ -279,6 +316,10 @@ impl Instance {
         Self {
             buttons: Default::default(),
             container,
+            display_handlers: Vec::new(),
+            filter: output::Filter::ShowAll,
+            filter_matched: false,
+            last_filter_attempt: None,
             last_snapshot: None,
             scroll_state,
             state,
@@ -286,37 +327,120 @@ impl Instance {
     }
 
     pub async fn task(&mut self) {
+        let (tx, rx) = self.state.event_stream();
+        self.connect_output_signals(&tx);
+
         // We have to build the output filter here, because until the Glib event loop has run the
         // container hasn't been realised, which means we can't figure out which output we're on.
-        let output_filter = Arc::new(Mutex::new(self.build_output_filter().await));
+        self.refresh_output_filter().await;
 
-        let mut stream = match self.state.event_stream() {
-            Ok(stream) => Box::pin(stream),
-            Err(e) => {
-                tracing::error!(%e, "error starting event stream");
-                return;
-            }
-        };
-        while let Some(event) = stream.next().await {
+        while let Ok(event) = rx.recv().await {
             match event {
                 Event::Notification(notification) => self.process_notification(notification).await,
                 Event::WindowSnapshot(windows) => {
-                    self.process_window_snapshot(windows, output_filter.clone())
-                        .await
+                    self.maybe_retry_output_filter().await;
+                    self.process_window_snapshot(windows);
                 }
-                Event::Workspaces(_) => {
-                    // We're just using this as a signal that the outputs may have changed.
-                    let new_filter = self.build_output_filter().await;
-                    *output_filter.lock().expect("output filter lock") = new_filter;
+                Event::OutputsChanged => {
+                    if self.refresh_output_filter().await {
+                        // The filter changed, so re-apply the last snapshot now rather than
+                        // waiting for the next window event to come along.
+                        if let Some(snapshot) = self.last_snapshot.clone() {
+                            self.process_window_snapshot(snapshot);
+                        }
+                    }
                 }
             }
         }
     }
 
+    /// Connects the Gtk and Gdk signals that indicate the outputs (or the bar's position on them)
+    /// may have changed.
+    fn connect_output_signals(&mut self, tx: &Sender<Event>) {
+        let notify = {
+            let tx = tx.clone();
+            move || {
+                // A closed channel just means this instance is going away.
+                let _ = tx.try_send(Event::OutputsChanged);
+            }
+        };
+
+        // Monitors coming and going.
+        let display = self.container.display();
+        let added = display.connect_monitor_added({
+            let notify = notify.clone();
+            move |_, _| notify()
+        });
+        let removed = display.connect_monitor_removed({
+            let notify = notify.clone();
+            move |_, _| notify()
+        });
+        self.display_handlers.push((display.clone(), added));
+        self.display_handlers.push((display, removed));
+
+        // The bar being resized or moved, for instance because its output changed mode.
+        if let Some(toplevel) = self.container.toplevel() {
+            let notify = notify.clone();
+            toplevel.connect_configure_event(move |_, _| {
+                notify();
+                false
+            });
+        } else {
+            tracing::warn!("no toplevel widget; cannot watch for bar configure events");
+        }
+
+        // Gdk may not know which monitor the bar is on when we first start, so re-check once
+        // things have settled.
+        glib::timeout_add_local_once(OUTPUT_FILTER_RECHECK, notify);
+    }
+
+    /// Re-evaluates the output filter, keeping the previous filter if the output can't currently
+    /// be determined. Returns true if the filter changed.
     #[tracing::instrument(level = "DEBUG", skip(self))]
-    async fn build_output_filter(&self) -> output::Filter {
+    async fn refresh_output_filter(&mut self) -> bool {
+        self.last_filter_attempt = Some(Instant::now());
+
+        let previous = self.filter.clone();
+        match self.build_output_filter().await {
+            Some(filter) => {
+                self.filter = filter;
+                self.filter_matched = true;
+            }
+            None => {
+                // Keep whatever we had (which, if we've never matched, is showing everything) and
+                // retry later.
+                self.filter_matched = false;
+            }
+        }
+
+        if self.filter != previous {
+            tracing::info!(?previous, filter = ?self.filter, "output filter changed");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Retries the output match if the last attempt failed and enough time has passed.
+    async fn maybe_retry_output_filter(&mut self) {
+        if self.filter_matched {
+            return;
+        }
+
+        if self
+            .last_filter_attempt
+            .is_none_or(|attempt| attempt.elapsed() >= OUTPUT_FILTER_RETRY)
+        {
+            self.refresh_output_filter().await;
+        }
+    }
+
+    /// Works out which output this bar is on, returning `None` if it can't be determined right
+    /// now.
+    #[tracing::instrument(level = "DEBUG", skip(self))]
+    async fn build_output_filter(&self) -> Option<output::Filter> {
         if self.state.config().show_all_outputs() {
-            return output::Filter::ShowAll;
+            return Some(output::Filter::ShowAll);
         }
 
         // OK, so we need to figure out what output we're on. Easy, right?
@@ -345,44 +469,55 @@ impl Instance {
         // What we'll do instead is match up what we can. Niri can tell us everything we want to
         // know about the output, and Gdk 3 does include things like the output geometry, make, and
         // model. So we'll match on those and hope for the best.
+        //
+        // Since outputs come and go (and Gdk doesn't necessarily know which monitor the bar is on
+        // the first time this runs), this gets re-run whenever the outputs might have changed.
         let niri = *self.state.niri();
         let outputs = match gio::spawn_blocking(move || niri.outputs()).await {
             Ok(Ok(outputs)) => outputs,
             Ok(Err(e)) => {
                 tracing::warn!(%e, "cannot get Niri outputs");
-                return output::Filter::ShowAll;
+                return None;
             }
             Err(_) => {
                 tracing::error!("error received from gio while waiting for task");
-                return output::Filter::ShowAll;
+                return None;
             }
         };
 
-        // If there's only one output, then none of this matching stuff matters anyway.
-        if outputs.len() == 1 {
-            return output::Filter::ShowAll;
+        if outputs.is_empty() {
+            tracing::warn!("Niri reports no outputs");
+            return None;
         }
 
         let Some(window) = self.container.window() else {
             tracing::warn!("cannot get Gdk window for container");
-            return output::Filter::ShowAll;
+            return None;
         };
 
         let display = window.display();
         let Some(monitor) = display.monitor_at_window(&window) else {
             tracing::warn!(display = ?window.display(), geometry = ?window.geometry(), "cannot get monitor for window");
-            return output::Filter::ShowAll;
+            return None;
         };
 
-        for (name, output) in outputs.into_iter() {
-            let matches = output::Matcher::new(&monitor, &output);
+        for (name, output) in outputs.iter() {
+            let matches = output::Matcher::new(&monitor, output);
             if matches == Matcher::all() {
-                return output::Filter::Only(name);
+                return Some(output::Filter::Only(name.clone()));
             }
         }
 
+        // If there's only one output, then this bar must be on it, even if Gdk's idea of the
+        // monitor doesn't line up with Niri's (which can happen around mode changes).
+        if outputs.len() == 1 {
+            let name = outputs.into_keys().next()?;
+            tracing::debug!(name, "only one Niri output; assuming the bar is on it");
+            return Some(output::Filter::Only(name));
+        }
+
         tracing::warn!(?monitor, "no Niri output matched the Gdk monitor");
-        output::Filter::ShowAll
+        None
     }
 
     #[tracing::instrument(level = "TRACE", skip(self))]
@@ -543,22 +678,17 @@ impl Instance {
     }
 
     #[tracing::instrument(level = "DEBUG", skip(self))]
-    async fn process_window_snapshot(
-        &mut self,
-        windows: Snapshot,
-        filter: Arc<Mutex<output::Filter>>,
-    ) {
+    fn process_window_snapshot(&mut self, windows: Snapshot) {
         // We need to track which, if any, windows are no longer present.
         let mut omitted = self.buttons.keys().copied().collect::<BTreeSet<_>>();
         let mut visible_window_ids = Vec::new();
         let mut focused_window_id = None;
 
-        for window in windows.iter().filter(|window| {
-            filter
-                .lock()
-                .expect("output filter lock")
-                .should_show(window.output().unwrap_or_default())
-        }) {
+        let filter = self.filter.clone();
+        for window in windows
+            .iter()
+            .filter(|window| filter.should_show(window.output().unwrap_or_default()))
+        {
             visible_window_ids.push(window.id);
             if window.is_focused {
                 focused_window_id = Some(window.id);
@@ -604,11 +734,28 @@ impl Instance {
         let previous_idx = scroll_state.current_idx;
         scroll_state.visible_window_ids = visible_window_ids;
         scroll_state.current_idx = focused_window_id
-            .and_then(|id| scroll_state.visible_window_ids.iter().position(|candidate| *candidate == id))
-            .or_else(|| previous_idx.map(|idx| idx.min(scroll_state.visible_window_ids.len().saturating_sub(1))));
+            .and_then(|id| {
+                scroll_state
+                    .visible_window_ids
+                    .iter()
+                    .position(|candidate| *candidate == id)
+            })
+            .or_else(|| {
+                previous_idx
+                    .map(|idx| idx.min(scroll_state.visible_window_ids.len().saturating_sub(1)))
+            });
 
         // Update the last snapshot.
         self.last_snapshot = Some(windows);
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        // The display outlives us, so we have to disconnect our handlers explicitly.
+        for (display, handler) in self.display_handlers.drain(..) {
+            display.disconnect(handler);
+        }
     }
 }
 

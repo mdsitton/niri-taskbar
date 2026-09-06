@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
-use async_channel::Sender;
-use futures::{Stream, StreamExt};
-use niri_ipc::Workspace;
+use async_channel::{Receiver, Sender};
+use futures::StreamExt;
 use waybar_cffi::gtk::glib;
 
 use crate::{
     config::Config,
-    error::Error,
     icon,
-    niri::{Niri, Snapshot, WindowStream},
+    niri::{Niri, Snapshot, WindowStream, WindowStreamItem},
     notify::{self, EnrichedNotification},
 };
 
@@ -42,7 +40,12 @@ impl State {
         &self.0.niri
     }
 
-    pub fn event_stream(&self) -> Result<impl Stream<Item = Event> + use<>, Error> {
+    /// Starts the event sources for a taskbar instance.
+    ///
+    /// The returned sender can be used to inject additional events (for example, from Gtk signal
+    /// handlers); the receiver yields all events in order. Dropping the receiver stops all of the
+    /// event sources.
+    pub fn event_stream(&self) -> (Sender<Event>, Receiver<Event>) {
         let (tx, rx) = async_channel::unbounded();
 
         if self.config().notifications_enabled() {
@@ -51,21 +54,7 @@ impl State {
 
         glib::spawn_future_local(window_stream(tx.clone(), self.niri().window_stream()));
 
-        // We don't want to send a set of workspaces through until after the window stream has
-        // yielded a window snapshot, and it's easier to defer it here than in the calling code.
-        let mut delay = Some((tx, self.niri().workspace_stream()?));
-
-        Ok(async_stream::stream! {
-            while let Ok(event) = rx.recv().await {
-                if let Some((tx, stream)) = delay.take() {
-                    if let &Event::Workspaces(_) = &event {
-                        glib::spawn_future_local(workspace_stream(tx, stream));
-                    }
-                }
-
-                yield event;
-            }
-        })
+        (tx, rx)
     }
 }
 
@@ -76,35 +65,40 @@ struct Inner {
     niri: Niri,
 }
 
+#[derive(Debug)]
 pub enum Event {
     Notification(Box<EnrichedNotification>),
     WindowSnapshot(Snapshot),
-    Workspaces(()),
+    /// The set of outputs, or the mapping of the taskbar onto an output, may have changed, and
+    /// the output filter should be re-evaluated.
+    OutputsChanged,
 }
 
 async fn notify_stream(tx: Sender<Event>) {
     let mut stream = Box::pin(notify::stream());
 
     while let Some(notification) = stream.next().await {
-        if let Err(e) = tx.send(Event::Notification(Box::new(notification))).await {
-            tracing::error!(%e, "error sending notification");
+        if tx
+            .send(Event::Notification(Box::new(notification)))
+            .await
+            .is_err()
+        {
+            tracing::debug!("notification receiver dropped; stopping notification stream");
+            return;
         }
     }
 }
 
 async fn window_stream(tx: Sender<Event>, window_stream: WindowStream) {
-    while let Some(snapshot) = window_stream.next().await {
-        if let Err(e) = tx.send(Event::WindowSnapshot(snapshot)).await {
-            tracing::error!(%e, "error sending window snapshot");
-        }
-    }
-}
+    while let Some(item) = window_stream.next().await {
+        let event = match item {
+            WindowStreamItem::WorkspacesChanged => Event::OutputsChanged,
+            WindowStreamItem::Snapshot(snapshot) => Event::WindowSnapshot(snapshot),
+        };
 
-async fn workspace_stream(tx: Sender<Event>, workspace_stream: impl Stream<Item = Vec<Workspace>>) {
-    let mut workspace_stream = Box::pin(workspace_stream);
-    while workspace_stream.next().await.is_some() {
-        if let Err(e) = tx.send(Event::Workspaces(())).await {
-            tracing::error!(%e, "error sending workspaces");
+        if tx.send(event).await.is_err() {
+            tracing::debug!("window snapshot receiver dropped; stopping window stream");
+            return;
         }
     }
 }

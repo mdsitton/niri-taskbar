@@ -2,7 +2,7 @@ use niri_ipc::{LogicalOutput, Output};
 use waybar_cffi::gtk::gdk::{Monitor, traits::MonitorExt};
 
 /// A filter to check if we should include a window button.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
     ShowAll,
     Only(String),

@@ -141,9 +141,12 @@ applications on all outputs:
 }
 ```
 
-Note that multiple output support is currently experimental, and may have some
-quirks. Please open an issue with your use case if it's not working as you
-expect!
+The taskbar works out which output it is on by matching the bar's monitor
+against Niri's output list, and re-checks this whenever outputs are added,
+removed, or reconfigured (for example, when a monitor is switched off or changes
+mode). Note that multiple output support is still somewhat experimental, and may
+have some quirks. Please open an issue with your use case if it's not working as
+you expect!
 
 ### Notifications
 
