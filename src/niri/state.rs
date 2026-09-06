@@ -232,34 +232,69 @@ impl Niri {
                 .then_with(|| a.window.id.cmp(&b.window.id))
         });
 
-        wws.into_iter()
+        let windows = wws
+            .into_iter()
             .map(|ww| Window {
                 window: ww.window.clone(),
-                output: ww.workspace.output.clone(),
-                workspace_is_active: ww.workspace.is_active,
+                workspace: WorkspaceInfo::from(ww.workspace),
             })
-            .collect()
+            .collect();
+
+        let mut workspaces: Vec<_> = self.workspaces.values().map(WorkspaceInfo::from).collect();
+        workspaces.sort_by_key(|ws| (ws.idx, ws.id));
+
+        Snapshot {
+            windows,
+            workspaces,
+        }
     }
 }
 
-/// A snapshot of current toplevel windows, ordered by workspace index.
-pub type Snapshot = Vec<Window>;
+/// A snapshot of the current toplevel windows (ordered by workspace index) and workspaces.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub windows: Vec<Window>,
+    pub workspaces: Vec<WorkspaceInfo>,
+}
+
+/// The parts of a Niri workspace that the taskbar cares about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceInfo {
+    pub id: u64,
+    pub idx: u8,
+    pub output: Option<String>,
+    /// Whether this is the active workspace on its output.
+    pub is_active: bool,
+    /// Whether this is the focused workspace overall.
+    pub is_focused: bool,
+}
+
+impl From<&Workspace> for WorkspaceInfo {
+    fn from(ws: &Workspace) -> Self {
+        Self {
+            id: ws.id,
+            idx: ws.idx,
+            output: ws.output.clone(),
+            is_active: ws.is_active,
+            is_focused: ws.is_focused,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Window {
     window: NiriWindow,
-    output: Option<String>,
-    workspace_is_active: bool,
+    workspace: WorkspaceInfo,
 }
 
 impl Window {
     pub fn output(&self) -> Option<&str> {
-        self.output.as_deref()
+        self.workspace.output.as_deref()
     }
 
-    /// Whether the window's workspace is the active workspace on its output.
-    pub fn workspace_is_active(&self) -> bool {
-        self.workspace_is_active
+    /// The workspace the window is on.
+    pub fn workspace(&self) -> &WorkspaceInfo {
+        &self.workspace
     }
 }
 

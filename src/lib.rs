@@ -20,12 +20,12 @@ use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use waybar_cffi::{
     Module,
     gtk::{
-        self, Orientation,
+        self, Orientation, StackTransitionType,
         gdk::{self, EventMask, EventScroll, ScrollDirection},
         gio,
         glib::{self, MainContext, Propagation, SignalHandlerId, object::Cast},
         prelude::{IsA, ObjectExt, WidgetExtManual},
-        traits::{BoxExt, ContainerExt, StyleContextExt, WidgetExt},
+        traits::{BoxExt, ContainerExt, StackExt, StyleContextExt, WidgetExt},
     },
     waybar_module,
 };
@@ -93,8 +93,14 @@ waybar_module!(TaskbarModule);
 async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<glib::JoinHandle<()>, Error> {
     // Set up the box that we'll use to contain the actual window buttons.
     let root = info.get_root_widget();
-    let container = gtk::Box::new(Orientation::Horizontal, 0);
+    // The container is a stack with one page per workspace (or a single page, if we're showing
+    // every workspace), so that switching workspaces can slide between pages like Niri does.
+    let container = gtk::Stack::new();
     container.style_context().add_class("niri-taskbar");
+    container.set_hhomogeneous(false);
+    container.set_vhomogeneous(true);
+    container.set_interpolate_size(true);
+    container.set_transition_duration(state.config().workspace_animation_ms());
     root.add(&container);
 
     let scroll_state = Arc::new(Mutex::new(ScrollState::default()));
@@ -299,28 +305,57 @@ const OUTPUT_FILTER_RETRY: Duration = Duration::from_secs(2);
 /// bar is on when the module is first initialised, so an early match can be wrong.
 const OUTPUT_FILTER_RECHECK: Duration = Duration::from_secs(2);
 
+/// Identifies a page in the taskbar stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PageKey {
+    /// The single page used when every workspace is shown at once.
+    All,
+    /// The page for a specific workspace, by Niri workspace ID.
+    Workspace(u64),
+}
+
+impl PageKey {
+    fn name(self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::Workspace(id) => format!("workspace-{id}"),
+        }
+    }
+}
+
+/// A window button, along with the page it currently lives on.
+struct Slot {
+    button: Button,
+    page: PageKey,
+}
+
 struct Instance {
-    buttons: BTreeMap<u64, Button>,
-    container: gtk::Box,
+    buttons: BTreeMap<u64, Slot>,
+    container: gtk::Stack,
+    /// The workspace index of the currently visible page, used to pick the slide direction.
+    current_idx: Option<u8>,
     display_handlers: Vec<(gdk::Display, SignalHandlerId)>,
     filter: output::Filter,
     filter_matched: bool,
     last_filter_attempt: Option<Instant>,
     last_snapshot: Option<Snapshot>,
+    pages: BTreeMap<PageKey, gtk::Box>,
     scroll_state: Arc<Mutex<ScrollState>>,
     state: State,
 }
 
 impl Instance {
-    pub fn new(state: State, container: gtk::Box, scroll_state: Arc<Mutex<ScrollState>>) -> Self {
+    pub fn new(state: State, container: gtk::Stack, scroll_state: Arc<Mutex<ScrollState>>) -> Self {
         Self {
             buttons: Default::default(),
             container,
+            current_idx: None,
             display_handlers: Vec::new(),
             filter: output::Filter::ShowAll,
             filter_matched: false,
             last_filter_attempt: None,
             last_snapshot: None,
+            pages: Default::default(),
             scroll_state,
             state,
         }
@@ -542,7 +577,7 @@ impl Instance {
             //
             // The easiest way to do that is with a map, which we can build from
             // the toplevels.
-            let pids = PidWindowMap::new(toplevels.iter());
+            let pids = PidWindowMap::new(toplevels.windows.iter());
 
             // We'll track if we found anything, since we might fall back to
             // some fuzzy matching.
@@ -553,7 +588,8 @@ impl Instance {
                     // If the window is already focused, there isn't really much
                     // to do.
                     if !window.is_focused {
-                        if let Some(button) = self.buttons.get(&window.id) {
+                        if let Some(button) = self.buttons.get(&window.id).map(|slot| &slot.button)
+                        {
                             tracing::trace!(
                                 ?button,
                                 ?window,
@@ -630,13 +666,13 @@ impl Instance {
             .to_lowercase();
 
         let mut found = false;
-        for window in toplevels.iter() {
+        for window in toplevels.windows.iter() {
             let Some(app_id) = window.app_id.as_deref() else {
                 continue;
             };
 
             if app_id == mapped {
-                if let Some(button) = self.buttons.get(&window.id) {
+                if let Some(button) = self.buttons.get(&window.id).map(|slot| &slot.button) {
                     tracing::trace!(app_id, ?button, ?window, "toplevel match found via app ID");
                     button.set_urgent();
                     found = true;
@@ -670,7 +706,7 @@ impl Instance {
 
         if !found {
             for id in fuzzy.into_iter() {
-                if let Some(button) = self.buttons.get(&id) {
+                if let Some(button) = self.buttons.get(&id).map(|slot| &slot.button) {
                     button.set_urgent();
                 }
             }
@@ -678,57 +714,120 @@ impl Instance {
     }
 
     #[tracing::instrument(level = "DEBUG", skip(self))]
-    fn process_window_snapshot(&mut self, windows: Snapshot) {
+    fn process_window_snapshot(&mut self, snapshot: Snapshot) {
+        let filter = self.filter.clone();
+        let active_workspace_only = self.state.config().active_workspace_only();
+        let animation_ms = self.state.config().workspace_animation_ms();
+
+        // Work out which page should be visible: the active workspace on this output (preferring
+        // the focused workspace if the filter spans several outputs), or the single "all" page.
+        let (target, target_idx) = if active_workspace_only {
+            let active: Vec<_> = snapshot
+                .workspaces
+                .iter()
+                .filter(|ws| {
+                    ws.is_active && filter.should_show(ws.output.as_deref().unwrap_or_default())
+                })
+                .collect();
+
+            match active.iter().find(|ws| ws.is_focused).or(active.first()) {
+                Some(ws) => (PageKey::Workspace(ws.id), Some(ws.idx)),
+                None => (PageKey::All, None),
+            }
+        } else {
+            (PageKey::All, None)
+        };
+
         // We need to track which, if any, windows are no longer present.
         let mut omitted = self.buttons.keys().copied().collect::<BTreeSet<_>>();
         let mut visible_window_ids = Vec::new();
         let mut focused_window_id = None;
 
-        let filter = self.filter.clone();
-        let active_workspace_only = self.state.config().active_workspace_only();
-        for window in windows.iter().filter(|window| {
-            filter.should_show(window.output().unwrap_or_default())
-                && (!active_workspace_only || window.workspace_is_active())
-        }) {
-            visible_window_ids.push(window.id);
-            if window.is_focused {
-                focused_window_id = Some(window.id);
-            }
+        for window in snapshot
+            .windows
+            .iter()
+            .filter(|window| filter.should_show(window.output().unwrap_or_default()))
+        {
+            let key = if active_workspace_only {
+                PageKey::Workspace(window.workspace().id)
+            } else {
+                PageKey::All
+            };
+            let page = self.ensure_page(key);
 
-            let button = match self.buttons.entry(window.id) {
-                Entry::Occupied(entry) => entry.into_mut(),
+            let slot = match self.buttons.entry(window.id) {
+                Entry::Occupied(entry) => {
+                    let slot = entry.into_mut();
+                    if slot.page != key {
+                        // The window moved to another workspace, so move its button along with
+                        // it.
+                        if let Some(old) = self.pages.get(&slot.page) {
+                            old.remove(slot.button.widget());
+                        }
+                        page.add(slot.button.widget());
+                        slot.page = key;
+                    }
+                    slot
+                }
                 Entry::Vacant(entry) => {
                     let button = Button::new(&self.state, window);
 
-                    // Implicitly adding the button widget to the box as we create it simplifies
+                    // Implicitly adding the button widget to the page as we create it simplifies
                     // reordering, since it means we can just do it as we go.
-                    self.container.add(button.widget());
-                    entry.insert(button)
+                    page.add(button.widget());
+                    entry.insert(Slot { button, page: key })
                 }
             };
 
             // Update the window properties.
-            button.set_focus(window.is_focused);
-            button.set_title(window.title.as_deref());
+            slot.button.set_focus(window.is_focused);
+            slot.button.set_title(window.title.as_deref());
 
             // Ensure we don't remove this button from the container.
             omitted.remove(&window.id);
 
-            // Since we get the windows in order in the snapshot, we can just
-            // push this to the back and then let other widgets push in front as
-            // we iterate.
-            self.container.reorder_child(button.widget(), -1);
+            // Since we get the windows in order in the snapshot, we can just push this to the
+            // back and then let other widgets push in front as we iterate.
+            page.reorder_child(slot.button.widget(), -1);
+
+            if key == target {
+                visible_window_ids.push(window.id);
+                if window.is_focused {
+                    focused_window_id = Some(window.id);
+                }
+            }
         }
 
         // Remove any windows that no longer exist.
         for id in omitted.into_iter() {
-            if let Some(button) = self.buttons.remove(&id) {
-                self.container.remove(button.widget());
+            if let Some(slot) = self.buttons.remove(&id) {
+                if let Some(page) = self.pages.get(&slot.page) {
+                    page.remove(slot.button.widget());
+                }
             }
         }
 
-        // Ensure everything is rendered.
+        // The target page may be a workspace with no windows on it yet.
+        self.ensure_page(target);
+
+        // Ensure everything is rendered. This has to happen before switching pages, since a stack
+        // won't switch to a child that isn't visible.
         self.container.show_all();
+
+        // Switch pages, sliding in the same direction Niri moves its workspaces.
+        let name = target.name();
+        if self.container.visible_child_name().as_deref() != Some(name.as_str()) {
+            let transition = match (self.current_idx, target_idx) {
+                _ if animation_ms == 0 => StackTransitionType::None,
+                (Some(from), Some(to)) if to > from => StackTransitionType::SlideUp,
+                (Some(from), Some(to)) if to < from => StackTransitionType::SlideDown,
+                _ => StackTransitionType::None,
+            };
+            self.container.set_visible_child_full(&name, transition);
+        }
+        self.current_idx = target_idx;
+
+        self.prune_pages(&snapshot, target);
 
         // Update the bar-wide scroll state.
         let mut scroll_state = self.scroll_state.lock().expect("scroll state lock");
@@ -745,9 +844,51 @@ impl Instance {
                 previous_idx
                     .map(|idx| idx.min(scroll_state.visible_window_ids.len().saturating_sub(1)))
             });
+        drop(scroll_state);
 
         // Update the last snapshot.
-        self.last_snapshot = Some(windows);
+        self.last_snapshot = Some(snapshot);
+    }
+
+    /// Returns the page for the given key, creating it if necessary.
+    fn ensure_page(&mut self, key: PageKey) -> gtk::Box {
+        self.pages
+            .entry(key)
+            .or_insert_with(|| {
+                let page = gtk::Box::new(Orientation::Horizontal, 0);
+                page.show();
+                self.container.add_named(&page, &key.name());
+                page
+            })
+            .clone()
+    }
+
+    /// Removes pages for workspaces that no longer exist.
+    fn prune_pages(&mut self, snapshot: &Snapshot, target: PageKey) {
+        // Removing the page a transition is sliding away from would cut the animation short, so
+        // leave stale pages alone until the stack is idle: they're empty and hidden anyway, and
+        // we'll get another chance on the next snapshot.
+        if self.container.is_transition_running() {
+            return;
+        }
+
+        let stale: Vec<_> = self
+            .pages
+            .keys()
+            .copied()
+            .filter(|key| match key {
+                PageKey::All => false,
+                PageKey::Workspace(id) => {
+                    *key != target && !snapshot.workspaces.iter().any(|ws| ws.id == *id)
+                }
+            })
+            .collect();
+
+        for key in stale {
+            if let Some(page) = self.pages.remove(&key) {
+                self.container.remove(&page);
+            }
+        }
     }
 }
 

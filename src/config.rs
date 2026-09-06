@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     active_workspace_only: bool,
     #[serde(default)]
+    workspace_animation_ms: u32,
+    #[serde(default)]
     scroll_windows: bool,
     #[serde(default)]
     scroll_scope: ScrollScope,
@@ -120,6 +122,10 @@ impl Config {
 
     pub fn active_workspace_only(&self) -> bool {
         self.active_workspace_only
+    }
+
+    pub fn workspace_animation_ms(&self) -> u32 {
+        self.workspace_animation_ms
     }
 
     pub fn scroll_windows(&self) -> bool {

@@ -167,6 +167,20 @@ enable the `active_workspace_only` option:
 The taskbar updates as you switch workspaces. When combined with bar scrolling,
 only the windows on the active workspace are cycled through.
 
+You can also have the taskbar slide between workspaces in the same direction
+Niri does, by setting `workspace_animation_ms` to the transition duration in
+milliseconds (something around 250 is close to Niri's default feel):
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "active_workspace_only": true,
+    "workspace_animation_ms": 250,
+  },
+}
+```
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar
