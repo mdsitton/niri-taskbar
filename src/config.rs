@@ -18,6 +18,12 @@ pub struct Config {
     #[serde(default)]
     workspace_animation_ms: u32,
     #[serde(default)]
+    focus_indicator: bool,
+    #[serde(default = "default_indicator_ms")]
+    focus_indicator_ms: u32,
+    #[serde(default = "default_indicator_height")]
+    focus_indicator_height: u32,
+    #[serde(default)]
     scroll_windows: bool,
     #[serde(default)]
     scroll_scope: ScrollScope,
@@ -128,6 +134,18 @@ impl Config {
         self.workspace_animation_ms
     }
 
+    pub fn focus_indicator(&self) -> bool {
+        self.focus_indicator
+    }
+
+    pub fn focus_indicator_ms(&self) -> u32 {
+        self.focus_indicator_ms
+    }
+
+    pub fn focus_indicator_height(&self) -> u32 {
+        self.focus_indicator_height
+    }
+
     pub fn scroll_windows(&self) -> bool {
         self.scroll_windows
     }
@@ -157,4 +175,12 @@ where
     D: Deserializer<'de>,
 {
     Regex::new(&String::deserialize(de)?).map_err(serde::de::Error::custom)
+}
+
+fn default_indicator_ms() -> u32 {
+    180
+}
+
+fn default_indicator_height() -> u32 {
+    3
 }

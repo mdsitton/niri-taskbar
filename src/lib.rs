@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry},
+    rc::Rc,
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -11,6 +12,7 @@ use async_channel::Sender;
 use button::Button;
 use config::{Config, ScrollScope};
 use error::Error;
+use indicator::Indicator;
 use niri::{Snapshot, Window};
 use notify::EnrichedNotification;
 use output::Matcher;
@@ -25,7 +27,7 @@ use waybar_cffi::{
         gio,
         glib::{self, MainContext, Propagation, SignalHandlerId, object::Cast},
         prelude::{IsA, ObjectExt, WidgetExtManual},
-        traits::{BoxExt, ContainerExt, StackExt, StyleContextExt, WidgetExt},
+        traits::{BoxExt, ContainerExt, OverlayExt, StackExt, StyleContextExt, WidgetExt},
     },
     waybar_module,
 };
@@ -34,6 +36,7 @@ mod button;
 mod config;
 mod error;
 mod icon;
+mod indicator;
 mod niri;
 mod notify;
 mod output;
@@ -323,6 +326,15 @@ impl PageKey {
     }
 }
 
+/// One page of the taskbar stack: a row of buttons, with an optional focus indicator drawn on
+/// top of it.
+#[derive(Clone)]
+struct Page {
+    overlay: gtk::Overlay,
+    row: gtk::Box,
+    indicator: Option<Rc<Indicator>>,
+}
+
 /// A window button, along with the page it currently lives on.
 struct Slot {
     button: Button,
@@ -339,7 +351,7 @@ struct Instance {
     filter_matched: bool,
     last_filter_attempt: Option<Instant>,
     last_snapshot: Option<Snapshot>,
-    pages: BTreeMap<PageKey, gtk::Box>,
+    pages: BTreeMap<PageKey, Page>,
     scroll_state: Arc<Mutex<ScrollState>>,
     state: State,
 }
@@ -762,9 +774,9 @@ impl Instance {
                         // The window moved to another workspace, so move its button along with
                         // it.
                         if let Some(old) = self.pages.get(&slot.page) {
-                            old.remove(slot.button.widget());
+                            old.row.remove(slot.button.widget());
                         }
-                        page.add(slot.button.widget());
+                        page.row.add(slot.button.widget());
                         slot.page = key;
                     }
                     slot
@@ -774,7 +786,7 @@ impl Instance {
 
                     // Implicitly adding the button widget to the page as we create it simplifies
                     // reordering, since it means we can just do it as we go.
-                    page.add(button.widget());
+                    page.row.add(button.widget());
                     entry.insert(Slot { button, page: key })
                 }
             };
@@ -788,7 +800,7 @@ impl Instance {
 
             // Since we get the windows in order in the snapshot, we can just push this to the
             // back and then let other widgets push in front as we iterate.
-            page.reorder_child(slot.button.widget(), -1);
+            page.row.reorder_child(slot.button.widget(), -1);
 
             if key == target {
                 visible_window_ids.push(window.id);
@@ -802,7 +814,7 @@ impl Instance {
         for id in omitted.into_iter() {
             if let Some(slot) = self.buttons.remove(&id) {
                 if let Some(page) = self.pages.get(&slot.page) {
-                    page.remove(slot.button.widget());
+                    page.row.remove(slot.button.widget());
                 }
             }
         }
@@ -816,7 +828,8 @@ impl Instance {
 
         // Switch pages, sliding in the same direction Niri moves its workspaces.
         let name = target.name();
-        if self.container.visible_child_name().as_deref() != Some(name.as_str()) {
+        let page_changed = self.container.visible_child_name().as_deref() != Some(name.as_str());
+        if page_changed {
             let transition = match (self.current_idx, target_idx) {
                 _ if animation_ms == 0 => StackTransitionType::None,
                 (Some(from), Some(to)) if to > from => StackTransitionType::SlideUp,
@@ -826,6 +839,17 @@ impl Instance {
             self.container.set_visible_child_full(&name, transition);
         }
         self.current_idx = target_idx;
+
+        // Slide the focus indicator to the focused button. There's no point animating across a
+        // page change, since the whole page is already moving.
+        if let Some(page) = self.pages.get(&target) {
+            if let Some(indicator) = &page.indicator {
+                let button = focused_window_id
+                    .and_then(|id| self.buttons.get(&id))
+                    .map(|slot| slot.button.widget().clone());
+                indicator.set_target(&page.row, button.as_ref(), !page_changed);
+            }
+        }
 
         self.prune_pages(&snapshot, target);
 
@@ -851,16 +875,42 @@ impl Instance {
     }
 
     /// Returns the page for the given key, creating it if necessary.
-    fn ensure_page(&mut self, key: PageKey) -> gtk::Box {
-        self.pages
-            .entry(key)
-            .or_insert_with(|| {
-                let page = gtk::Box::new(Orientation::Horizontal, 0);
-                page.show();
-                self.container.add_named(&page, &key.name());
-                page
-            })
-            .clone()
+    fn ensure_page(&mut self, key: PageKey) -> Page {
+        if let Some(page) = self.pages.get(&key) {
+            return page.clone();
+        }
+
+        let row = gtk::Box::new(Orientation::Horizontal, 0);
+        let overlay = gtk::Overlay::new();
+        overlay.add(&row);
+
+        let config = self.state.config();
+        let indicator = if config.focus_indicator() {
+            let indicator = Indicator::new(
+                &row,
+                config.focus_indicator_height(),
+                config.focus_indicator_ms(),
+            );
+            overlay.add_overlay(indicator.widget());
+            // Without this the indicator would swallow clicks and scrolls meant for the buttons
+            // underneath it.
+            overlay.set_overlay_pass_through(indicator.widget(), true);
+            Some(Rc::new(indicator))
+        } else {
+            None
+        };
+
+        overlay.show_all();
+        self.container.add_named(&overlay, &key.name());
+
+        let page = Page {
+            overlay,
+            row,
+            indicator,
+        };
+        self.pages.insert(key, page.clone());
+
+        page
     }
 
     /// Removes pages for workspaces that no longer exist.
@@ -886,7 +936,7 @@ impl Instance {
 
         for key in stale {
             if let Some(page) = self.pages.remove(&key) {
-                self.container.remove(&page);
+                self.container.remove(&page.overlay);
             }
         }
     }

@@ -181,6 +181,42 @@ milliseconds (something around 250 is close to Niri's default feel):
 }
 ```
 
+### Sliding focus indicator
+
+Instead of styling the focused button directly, the taskbar can draw a pill
+underneath it that slides along as the focus moves:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "focus_indicator": true,
+    "focus_indicator_ms": 180,
+    "focus_indicator_height": 3,
+  },
+}
+```
+
+`focus_indicator_ms` is how long the slide takes, and `focus_indicator_height`
+is the thickness of the pill in pixels. Set the duration to 0 to have it jump
+instead of sliding.
+
+The pill is drawn rather than packed into the row, so it can sit between two
+buttons while it moves and never disturbs their layout. Style it through the
+`indicator` class, which accepts the usual background, border, and border radius
+properties, plus horizontal margins to inset it from the edges of the button:
+
+```css
+.niri-taskbar .indicator {
+  background-color: #00f0f0;
+  border-radius: 999px;
+  margin: 0 8px 2px 8px;
+}
+```
+
+Because the pill shows which window is focused, you will usually want to drop
+whatever the `focused` class was doing to mark it before.
+
 ### Notifications
 
 You can enable the `notifications` configuration option to have the taskbar
