@@ -1,0 +1,6 @@
+# makepkg working directories and outputs
+/niri-taskbar/
+/src/
+/pkg/
+/*.pkg.tar*
+/*.log

@@ -1,0 +1,37 @@
+# Maintainer: Matthew Sitton <matthewsitton@gmail.com>
+# Based on the AUR waybar-niri-taskbar-git PKGBUILD by Corey Mwamba.
+#
+# Builds from the mdsitton fork rather than upstream. To rebuild after pushing to the fork:
+#   cd packaging && makepkg -sif
+pkgname=waybar-niri-taskbar-git
+_pkgname=niri-taskbar
+pkgver=r54.2c595e1
+pkgver() {
+  cd "$_pkgname"
+  ( set -o pipefail
+    git describe --long --abbrev=7 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  )
+}
+pkgrel=1
+pkgdesc="A simple taskbar for Niri, written in Rust (mdsitton fork)"
+arch=('x86_64')
+url="https://github.com/mdsitton/niri-taskbar"
+license=('MIT')
+depends=('niri' 'waybar' 'gtk3')
+makedepends=('rust' 'cargo' 'git')
+provides=('waybar-niri-taskbar')
+conflicts=('waybar-niri-taskbar')
+source=("$_pkgname::git+$url#branch=main")
+sha256sums=('SKIP')
+
+build() {
+  cd "$_pkgname"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 "target/release/libniri_taskbar.so" "$pkgdir/usr/lib/waybar/libniri_taskbar.so"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
