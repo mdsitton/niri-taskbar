@@ -87,7 +87,9 @@ fn lookup_by_startup_wm_class(wm_class: &str) -> Option<PathBuf> {
             continue;
         }
 
-        let icon = desktop_info.icon()?;
+        let Some(icon) = desktop_info.icon() else {
+            continue;
+        };
 
         if let Ok(file_icon) = icon.clone().downcast::<FileIcon>() {
             if let Some(path) = file_icon.file().path() {
