@@ -2,6 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     fmt::Debug,
     path::PathBuf,
+    rc::Rc,
 };
 
 use waybar_cffi::gtk::{
@@ -22,6 +23,8 @@ pub struct Button {
     notified: Cell<bool>,
     /// Attention asked for through Niri itself, which follows whatever Niri last told us.
     niri_urgent: Cell<bool>,
+    /// Set to swallow the next click, which is how a drag avoids also activating the window.
+    click_blocked: Rc<Cell<bool>>,
 }
 
 impl Debug for Button {
@@ -83,6 +86,7 @@ impl Button {
             state,
             notified: Cell::new(false),
             niri_urgent: Cell::new(false),
+            click_blocked: Default::default(),
         };
 
         // Set up our event handlers. It's easier to do this with self already available.
@@ -168,10 +172,19 @@ impl Button {
         &self.button
     }
 
+    /// Returns the flag that, when set, swallows the next click on this button.
+    pub fn click_blocker(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.click_blocked)
+    }
+
     fn connect_click_handler(&self, window_id: u64) {
         let state = self.state.clone();
+        let blocked = self.click_blocker();
 
         self.button.connect_clicked(move |_| {
+            if blocked.replace(false) {
+                return;
+            }
             if let Err(e) = state.niri().activate_window(window_id) {
                 tracing::warn!(%e, id = window_id, "error trying to activate window");
             }

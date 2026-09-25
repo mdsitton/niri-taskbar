@@ -27,6 +27,13 @@ impl Niri {
         reply::typed!(Handled, reply)
     }
 
+    /// Requests that the focused column be moved to the given 1-based index on its workspace.
+    #[tracing::instrument(level = "TRACE", err)]
+    pub fn move_column_to_index(&self, index: usize) -> Result<(), Error> {
+        let reply = request(Request::Action(Action::MoveColumnToIndex { index }))?;
+        reply::typed!(Handled, reply)
+    }
+
     /// Requests that the given workspace ID should be focused.
     #[tracing::instrument(level = "TRACE", err)]
     pub fn focus_workspace(&self, id: u64) -> Result<(), Error> {

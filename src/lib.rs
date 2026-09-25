@@ -14,6 +14,7 @@ use indicator::{Indicator, Options as IndicatorOptions};
 use niri::{Snapshot, Window};
 use notify::EnrichedNotification;
 use process::Process;
+use reorder::{Placement, Reorder};
 use state::{Event, State};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use waybar_cffi::{
@@ -31,12 +32,14 @@ use waybar_cffi::{
 mod button;
 mod config;
 mod error;
+mod gradient;
 mod icon;
 mod indicator;
 mod niri;
 mod notify;
 mod output;
 mod process;
+mod reorder;
 mod state;
 mod workspaces;
 
@@ -358,6 +361,7 @@ struct Instance {
     last_snapshot: Option<Snapshot>,
     outputs: output::Tracker,
     pages: BTreeMap<PageKey, Page>,
+    reorder: Reorder,
     scroll_state: Arc<Mutex<ScrollState>>,
     state: State,
 }
@@ -371,6 +375,7 @@ impl Instance {
             outputs: output::Tracker::new(state.clone(), &container),
             container,
             pages: Default::default(),
+            reorder: Reorder::new(state.clone()),
             scroll_state,
             state,
         }
@@ -596,11 +601,14 @@ impl Instance {
         let mut omitted = self.buttons.keys().copied().collect::<BTreeSet<_>>();
         let mut visible_window_ids = Vec::new();
         let mut focused_window_id = None;
+        let mut placements = HashMap::new();
+        let dragging = self.reorder.is_dragging();
 
-        for window in snapshot
+        for (order, window) in snapshot
             .windows
             .iter()
             .filter(|window| filter.should_show(window.output().unwrap_or_default()))
+            .enumerate()
         {
             let key = if active_workspace_only {
                 PageKey::Workspace(window.workspace().id)
@@ -632,6 +640,7 @@ impl Instance {
                 }
                 Entry::Vacant(entry) => {
                     let button = Button::new(&self.state, window);
+                    self.reorder.attach(&button, window.id);
 
                     // Implicitly adding the button widget to the page as we create it simplifies
                     // reordering, since it means we can just do it as we go.
@@ -658,8 +667,24 @@ impl Instance {
             omitted.remove(&window.id);
 
             // Since we get the windows in order in the snapshot, we can just push this to the
-            // back and then let other widgets push in front as we iterate.
-            page.row.reorder_child(slot.button.widget(), -1);
+            // back and then let other widgets push in front as we iterate. Mid-drag, though, the
+            // row order belongs to the drag until it's dropped.
+            if !dragging {
+                page.row.reorder_child(slot.button.widget(), -1);
+            }
+
+            placements.insert(
+                window.id,
+                Placement {
+                    button: slot.button.widget().clone(),
+                    workspace: window.workspace().id,
+                    column: window
+                        .layout
+                        .pos_in_scrolling_layout
+                        .map(|(column, _)| column),
+                    order,
+                },
+            );
 
             if key == target {
                 visible_window_ids.push(window.id);
@@ -677,6 +702,8 @@ impl Instance {
                 }
             }
         }
+
+        self.reorder.set_placements(placements);
 
         // The target page may be a workspace with no windows on it yet.
         self.ensure_page(target);
@@ -760,7 +787,10 @@ impl Instance {
                     IndicatorOptions {
                         focus: config.focus_indicator(),
                         focus_height: config.focus_indicator_height(),
+                        focus_hover_height: config.focus_indicator_hover_height(),
+                        focus_hover_space: config.focus_indicator_hover_space(),
                         focus_ms: config.focus_indicator_ms(),
+                        drag_gradient: config.drag_indicator_gradient(),
                         hover: config.hover_indicator(),
                         hover_height: config.hover_indicator_height(),
                         hover_ms: config.hover_indicator_ms(),

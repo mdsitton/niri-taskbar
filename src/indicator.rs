@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::gradient::{Gradient, Space};
 use waybar_cffi::gtk::{
     self as gtk, CssProvider, StateFlags, StyleContext, cairo,
     glib::{ControlFlow, SignalHandlerId, Value, object::Cast, object::ObjectExt, value::ToValue},
@@ -19,12 +20,17 @@ use waybar_cffi::gtk::{
 };
 
 /// The default appearance, which a user stylesheet can override through
-/// `.niri-taskbar .indicator` and `.niri-taskbar .indicator.hover`.
+/// `.niri-taskbar .indicator`, `.niri-taskbar .indicator.focus-hover` and
+/// `.niri-taskbar .indicator.hover`.
 const DEFAULT_CSS: &[u8] = b"
 .indicator {
   background-color: rgba(255, 255, 255, 0.85);
   border-radius: 999px;
   margin: 0 6px;
+}
+
+.indicator.focus-hover {
+  background-color: rgb(255, 255, 255);
 }
 
 .indicator.hover {
@@ -51,6 +57,8 @@ thread_local! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Focus,
+    /// The focus pill's look while its button is hovered, which it blends into.
+    FocusHover,
     Hover,
     Urgent,
 }
@@ -60,6 +68,7 @@ impl Kind {
     fn class(self) -> Option<&'static str> {
         match self {
             Self::Focus => None,
+            Self::FocusHover => Some("focus-hover"),
             Self::Hover => Some("hover"),
             Self::Urgent => Some("urgent"),
         }
@@ -72,6 +81,11 @@ pub struct Options {
     pub focus: bool,
     pub focus_height: u32,
     pub focus_ms: u32,
+    pub focus_hover_height: u32,
+    /// The colour space the focus pill fades into its hovered colour through.
+    pub focus_hover_space: Space,
+    /// Drawn in place of the focus pill's usual look while its button is being dragged.
+    pub drag_gradient: Option<Gradient>,
     pub hover: bool,
     pub hover_height: u32,
     pub hover_ms: u32,
@@ -125,6 +139,14 @@ struct Focus {
     started: Option<Instant>,
 }
 
+/// A transition between two looks of the focus pill, from 0 (its usual look) to 1.
+#[derive(Debug, Default)]
+struct Fade {
+    from: f64,
+    to: f64,
+    started: Option<Instant>,
+}
+
 #[derive(Debug, Default)]
 struct Hover {
     /// The button being hovered, kept while the pill retracts after the pointer leaves.
@@ -138,6 +160,11 @@ struct Hover {
 
 struct Inner {
     focus: RefCell<Focus>,
+    /// How far the focus pill has changed into its hovered look, which takes the place of the
+    /// hover pill on the focused button.
+    focus_hover: RefCell<Fade>,
+    /// How far the focus pill has changed into the drag gradient.
+    drag_fade: RefCell<Fade>,
     hover: RefCell<Hover>,
     hover_duration: Duration,
     /// Fixed point the pulse is measured from, so every urgent pill throbs in step.
@@ -156,12 +183,29 @@ impl Inner {
         let focus = self.focus.borrow();
         // The destination is recomputed every frame rather than cached, so the pill follows
         // buttons that haven't been allocated yet, and tracks the row as it reflows.
-        let to = self.button_rect(
+        let mut to = self.button_rect(
             focus.button.as_ref(),
             row,
             context,
             f64::from(self.options.focus_height),
         )?;
+
+        // While hovered, the pill takes on the thickness and margins of its hovered look. A drag
+        // counts as hovered too, even though it clears the hover state, so the pill stays lifted.
+        let extent = self.focus_hover_extent().max(self.drag_extent());
+        if extent > 0.0 {
+            let hovered = with_class(row, Kind::FocusHover, |context| {
+                self.button_rect(
+                    focus.button.as_ref(),
+                    row,
+                    context,
+                    f64::from(self.options.focus_hover_height),
+                )
+            });
+            if let Some(hovered) = hovered {
+                to = to.lerp(hovered, extent);
+            }
+        }
 
         let Some(from) = focus.from else {
             return Some(to);
@@ -206,6 +250,124 @@ impl Inner {
             width,
             height: rest.height,
         })
+    }
+
+    /// Whether the focused button is being dragged with a gradient to show for it.
+    fn dragging(&self) -> bool {
+        self.options.drag_gradient.is_some()
+            && self
+                .focus
+                .borrow()
+                .button
+                .as_ref()
+                .is_some_and(|button| button.style_context().has_class("dragging"))
+    }
+
+    /// The drag gradient's fade in or out, if there's a gradient to fade.
+    fn drag_fade_duration(&self) -> Duration {
+        let ms = self
+            .options
+            .drag_gradient
+            .map_or(0, |gradient| gradient.fade_ms);
+        Duration::from_millis(u64::from(ms))
+    }
+
+    /// How far the focus pill is into its drag gradient, from 0 to 1.
+    fn drag_extent(&self) -> f64 {
+        let fade = self.drag_fade.borrow();
+        let t = progress(fade.started, self.drag_fade_duration());
+        fade.from + (fade.to - fade.from) * t
+    }
+
+    /// Starts the drag gradient fading in or out if a drag has started or stopped, returning
+    /// true if it did.
+    ///
+    /// Nothing tells us when that happens, but the button changes class as it does, which
+    /// redraws the row, so this is checked from there.
+    fn sync_drag(&self) -> bool {
+        let to = if self.dragging() { 1.0 } else { 0.0 };
+        if self.drag_fade.borrow().to == to {
+            return false;
+        }
+
+        let from = self.drag_extent();
+        let mut fade = self.drag_fade.borrow_mut();
+        fade.from = from;
+        fade.to = to;
+        fade.started = Some(Instant::now());
+        true
+    }
+
+    /// How far the focus pill is into its hovered look, from 0 to 1.
+    fn focus_hover_extent(&self) -> f64 {
+        let focus_hover = self.focus_hover.borrow();
+        let t = progress(focus_hover.started, self.hover_duration);
+        focus_hover.from + (focus_hover.to - focus_hover.from) * t
+    }
+
+    /// Points the focus pill towards or away from its hovered look, depending on whether the
+    /// pointer is over the focused button, returning true if anything changed.
+    ///
+    /// Dragging to reorder clears the hover state, so this switches itself off mid-drag.
+    fn update_focus_hover(&self) -> bool {
+        if !self.options.focus || !self.options.hover {
+            return false;
+        }
+
+        let hovered = self
+            .focus
+            .borrow()
+            .button
+            .as_ref()
+            .is_some_and(|button| button.state_flags().contains(StateFlags::PRELIGHT));
+        let to = if hovered { 1.0 } else { 0.0 };
+        if self.focus_hover.borrow().to == to {
+            return false;
+        }
+
+        let from = self.focus_hover_extent();
+        let mut focus_hover = self.focus_hover.borrow_mut();
+        focus_hover.from = from;
+        focus_hover.to = to;
+        focus_hover.started = Some(Instant::now());
+        true
+    }
+
+    /// Whether the hover pill belongs under the given button: it's hovered, and it doesn't already
+    /// have the focus pill under it, since the two would just fight over the same spot.
+    fn wants_hover(&self, button: &gtk::Button) -> bool {
+        button.state_flags().contains(StateFlags::PRELIGHT)
+            && !(self.options.focus && self.focus.borrow().button.as_ref() == Some(button))
+    }
+
+    /// Grows or retracts the hover pill under the given button, returning true if anything
+    /// changed.
+    fn update_hover(&self, button: &gtk::Button, hovered: bool) -> bool {
+        let mut hover = self.hover.borrow_mut();
+        let is_current = hover.button.as_ref() == Some(button);
+
+        if hovered {
+            if is_current && hover.to >= 1.0 {
+                return false;
+            }
+            // Moving straight from one button to another restarts the growth on the new one
+            // rather than sliding across, which is what "grows out from underneath" means.
+            hover.from = if is_current {
+                self.hover_extent(&hover)
+            } else {
+                0.0
+            };
+            hover.button = Some(button.clone());
+            hover.to = 1.0;
+        } else {
+            if !is_current || hover.to <= 0.0 {
+                return false;
+            }
+            hover.from = self.hover_extent(&hover);
+            hover.to = 0.0;
+        }
+        hover.started = Some(Instant::now());
+        true
     }
 
     fn hover_extent(&self, hover: &Hover) -> f64 {
@@ -265,13 +427,20 @@ impl Inner {
         let hover_running =
             matches!(hover.started, Some(started) if started.elapsed() < self.hover_duration);
 
+        let focus_hover = self.focus_hover.borrow();
+        let focus_hover_running =
+            matches!(focus_hover.started, Some(started) if started.elapsed() < self.hover_duration);
+
         // The urgent pulse has no end of its own: it runs for as long as something is urgent.
         // This is worked out from the row directly rather than from the last paint, because the
         // tick is checked before the frame is drawn and would otherwise stop before the first
         // paint had noticed anything.
         let pulsing = self.options.urgent && self.options.urgent_pulse_ms > 0 && has_urgent(row);
 
-        focus_running || hover_running || pulsing
+        // The gradient scrolls for as long as it's showing at all, fading out included.
+        let gradient_showing = self.drag_fade.borrow().to > 0.0 || self.drag_extent() > 0.0;
+
+        focus_running || hover_running || focus_hover_running || pulsing || gradient_showing
     }
 
     /// How opaque the urgent pill should be right now, easing between dim and full so it
@@ -305,6 +474,8 @@ impl Indicator {
 
         let inner = Rc::new(Inner {
             focus: RefCell::new(Focus::default()),
+            focus_hover: RefCell::new(Fade::default()),
+            drag_fade: RefCell::new(Fade::default()),
             hover: RefCell::new(Hover::default()),
             hover_duration: Duration::from_millis(u64::from(options.hover_ms)),
             epoch: Instant::now(),
@@ -322,6 +493,10 @@ impl Indicator {
                 let cr = values.get(1).and_then(|v| v.get::<cairo::Context>().ok());
 
                 if let (Some(row), Some(cr)) = (row, cr) {
+                    if inner.sync_drag() {
+                        wake(&row, &inner);
+                    }
+
                     // Painted bottom to top, so the focus pill wins wherever they overlap.
                     draw_urgent(&inner, &row, &cr);
                     draw(&inner, &row, &cr, Kind::Hover);
@@ -369,6 +544,18 @@ impl Indicator {
             }
         }
 
+        self.inner.update_focus_hover();
+
+        // Focus arriving at the hovered button takes the hover pill away, and focus leaving a
+        // button the pointer is still over brings it back.
+        if self.inner.options.hover {
+            let hovered = self.inner.hover.borrow().button.clone();
+            if let Some(hovered) = hovered {
+                self.inner
+                    .update_hover(&hovered, self.inner.wants_hover(&hovered));
+            }
+        }
+
         self.wake();
     }
 
@@ -383,34 +570,12 @@ impl Indicator {
                 return;
             }
 
-            let hovered = button.state_flags().contains(StateFlags::PRELIGHT);
-            let mut hover = inner.hover.borrow_mut();
-            let is_current = hover.button.as_ref() == Some(button);
-
-            if hovered {
-                if is_current && hover.to >= 1.0 {
-                    return;
-                }
-                // Moving straight from one button to another restarts the growth on the new one
-                // rather than sliding across, which is what "grows out from underneath" means.
-                hover.from = if is_current {
-                    inner.hover_extent(&hover)
-                } else {
-                    0.0
-                };
-                hover.button = Some(button.clone());
-                hover.to = 1.0;
-            } else {
-                if !is_current || hover.to <= 0.0 {
-                    return;
-                }
-                hover.from = inner.hover_extent(&hover);
-                hover.to = 0.0;
+            // Both run regardless of the other, so neither can be skipped.
+            let hover_changed = inner.update_hover(button, inner.wants_hover(button));
+            let focus_changed = inner.update_focus_hover();
+            if hover_changed || focus_changed {
+                wake(&row, &inner);
             }
-            hover.started = Some(Instant::now());
-            drop(hover);
-
-            wake(&row, &inner);
         })
     }
 
@@ -430,6 +595,8 @@ fn draw(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context, kind: Kind) {
     let rect = with_class(row, kind, |context| match kind {
         Kind::Focus => inner.focus_rect(row, context),
         Kind::Hover => inner.hover_rect(row, context),
+        // The hovered look is blended in below, on top of the focus pill.
+        Kind::FocusHover => None,
         // Urgent is plural, so it goes through draw_urgent instead.
         Kind::Urgent => None,
     });
@@ -444,6 +611,98 @@ fn draw(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context, kind: Kind) {
     with_class(row, kind, |context| {
         gtk::render_background(context, cr, rect.x, rect.y, rect.width, rect.height);
         gtk::render_frame(context, cr, rect.x, rect.y, rect.width, rect.height);
+    });
+
+    // Fade the focus pill into its hovered colour. Rather than cross-fading the two, which
+    // could only ever mix them in sRGB, work out the colour in between in the configured colour
+    // space and paint the pill over in that.
+    if kind == Kind::Focus {
+        let extent = inner.focus_hover_extent();
+        if extent > 0.0 {
+            let from = with_class(row, Kind::Focus, background_colour);
+            let to = with_class(row, Kind::FocusHover, background_colour);
+            let [r, g, b, a] = inner.options.focus_hover_space.mix(from, to, extent);
+
+            with_class(row, Kind::Focus, |context| {
+                cr.push_group();
+                gtk::render_background(context, cr, rect.x, rect.y, rect.width, rect.height);
+                cr.set_operator(cairo::Operator::In);
+                cr.set_source_rgba(r, g, b, a);
+                let _ = cr.paint();
+                if cr.pop_group_to_source().is_ok() {
+                    let _ = cr.paint();
+                }
+            });
+        }
+
+        if let Some(gradient) = inner.options.drag_gradient {
+            let extent = inner.drag_extent();
+            if extent > 0.0 {
+                draw_gradient(inner, row, cr, rect, gradient, extent);
+            }
+        }
+    }
+}
+
+/// The background colour a style context would paint, as sRGB with alpha.
+fn background_colour(context: &StyleContext) -> [f64; 4] {
+    context
+        .style_property_for_state("background-color", StateFlags::NORMAL)
+        .get::<gtk::gdk::RGBA>()
+        .map(|c| [c.red(), c.green(), c.blue(), c.alpha()])
+        .unwrap_or([0.0; 4])
+}
+
+/// Draws the focus pill filled with a gradient that scrolls along it, for while its button is
+/// being dragged.
+fn draw_gradient(
+    inner: &Rc<Inner>,
+    row: &gtk::Box,
+    cr: &cairo::Context,
+    rect: Rect,
+    gradient: Gradient,
+    extent: f64,
+) {
+    // The gradient runs there and back so it tiles without a seam, and each leg spans the whole
+    // pill so there's always a full sweep of colour on show.
+    let period = rect.width * 2.0;
+    let phase = if gradient.cycle_ms == 0 {
+        0.0
+    } else {
+        let cycle = f64::from(gradient.cycle_ms) / 1000.0;
+        (inner.epoch.elapsed().as_secs_f64() / cycle).fract()
+    };
+    let start = rect.x + phase * period;
+
+    let pattern = cairo::LinearGradient::new(start - period, 0.0, start, 0.0);
+    pattern.set_extend(cairo::Extend::Repeat);
+    const STEPS: u32 = 16;
+    for step in 0..=STEPS {
+        let t = f64::from(step) / f64::from(STEPS);
+        let [r, g, b, a] = gradient.at(t);
+        pattern.add_color_stop_rgba(t / 2.0, r, g, b, a);
+        pattern.add_color_stop_rgba(1.0 - t / 2.0, r, g, b, a);
+    }
+
+    // Coming and going, the gradient spreads out from the middle of the pill (or shrinks back
+    // into it) as a smaller pill of its own, fading as it goes. It starts no narrower than it is
+    // tall, so it opens out of a dot rather than a sliver.
+    let width = rect.height.min(rect.width) + (rect.width - rect.height).max(0.0) * extent;
+    let x = rect.x + (rect.width - width) / 2.0;
+
+    // The stylesheet still decides the pill's shape: draw it as usual, then swap its colour for
+    // the gradient wherever it painted. The gradient stays put relative to the full pill, so it
+    // doesn't squash as it spreads.
+    with_class(row, Kind::Focus, |context| {
+        cr.push_group();
+        gtk::render_background(context, cr, x, rect.y, width, rect.height);
+        cr.set_operator(cairo::Operator::In);
+        if cr.set_source(&pattern).is_ok() {
+            let _ = cr.paint();
+        }
+        if cr.pop_group_to_source().is_ok() {
+            let _ = cr.paint_with_alpha(extent);
+        }
     });
 }
 

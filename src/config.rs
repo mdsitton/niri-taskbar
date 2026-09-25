@@ -4,6 +4,8 @@ use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Deserializer};
 
+use crate::gradient::{Config as GradientConfig, Gradient, Space};
+
 /// The taskbar configuration.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -26,6 +28,10 @@ pub struct Config {
     #[serde(default = "default_indicator_height")]
     focus_indicator_height: u32,
     #[serde(default)]
+    focus_indicator_hover_height: Option<u32>,
+    #[serde(default)]
+    focus_indicator_hover_in: Option<String>,
+    #[serde(default)]
     hover_indicator: bool,
     #[serde(default = "default_hover_indicator_ms")]
     hover_indicator_ms: u32,
@@ -45,6 +51,10 @@ pub struct Config {
     scroll_wrap: bool,
     #[serde(default)]
     scroll_reverse: bool,
+    #[serde(default)]
+    drag_reorder: bool,
+    #[serde(default)]
+    drag_indicator_gradient: Option<GradientConfig>,
 }
 
 /// Which of the two widgets this module instance should render.
@@ -173,6 +183,13 @@ impl Config {
         self.focus_indicator_height
     }
 
+    /// How thick the focus pill grows to while its button is hovered, defaulting to a little
+    /// thicker than usual.
+    pub fn focus_indicator_hover_height(&self) -> u32 {
+        self.focus_indicator_hover_height
+            .unwrap_or(self.focus_indicator_height + 2)
+    }
+
     pub fn hover_indicator(&self) -> bool {
         self.hover_indicator
     }
@@ -211,6 +228,28 @@ impl Config {
 
     pub fn scroll_reverse(&self) -> bool {
         self.scroll_reverse
+    }
+
+    pub fn drag_reorder(&self) -> bool {
+        self.drag_reorder
+    }
+
+    /// The colour space the focus pill fades between its usual and hovered colours in.
+    pub fn focus_indicator_hover_space(&self) -> Space {
+        let Some(space) = self.focus_indicator_hover_in.as_deref() else {
+            return Space::default();
+        };
+        Space::parse(space)
+            .inspect_err(|e| tracing::warn!(%e, "ignoring focus_indicator_hover_in"))
+            .unwrap_or_default()
+    }
+
+    /// The gradient the focus pill cycles through while its button is being dragged, if any.
+    pub fn drag_indicator_gradient(&self) -> Option<Gradient> {
+        let config = self.drag_indicator_gradient.as_ref()?;
+        Gradient::parse(config)
+            .inspect_err(|e| tracing::warn!(%e, "ignoring drag_indicator_gradient"))
+            .ok()
     }
 }
 

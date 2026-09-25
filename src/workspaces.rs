@@ -47,7 +47,10 @@ impl Instance {
             IndicatorOptions {
                 focus: config.focus_indicator(),
                 focus_height: config.focus_indicator_height(),
+                focus_hover_height: config.focus_indicator_hover_height(),
+                focus_hover_space: config.focus_indicator_hover_space(),
                 focus_ms: config.focus_indicator_ms(),
+                drag_gradient: None,
                 hover: config.hover_indicator(),
                 hover_height: config.hover_indicator_height(),
                 hover_ms: config.hover_indicator_ms(),

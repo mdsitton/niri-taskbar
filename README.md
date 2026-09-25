@@ -126,6 +126,60 @@ This uses the taskbar's current visible window order and is intended for setups
 where you want to throw the cursor to the edge of the screen and scroll to
 switch windows.
 
+### Dragging buttons to reorder columns
+
+You can enable `drag_reorder` to drag a button left or right along the taskbar
+to move its window's column in Niri's scrolling layout:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "drag_reorder": true,
+  },
+}
+```
+
+The window is focused as soon as the button is pressed, and its column moves in
+Niri as it passes each of the other columns. A few things to be aware of:
+
+- Since the window is focused on press rather than on release, this also
+  changes plain clicks to focus on press.
+- Columns move as a whole, so dragging any window in a column with several
+  windows stacked in it moves all of them.
+- Buttons only move among the other columns on the same workspace. Floating
+  windows aren't in a column, so they can't be dragged.
+
+While a button is being dragged it has the `dragging` class, if you want to
+style it differently.
+
+With the focus indicator turned on, its pill can also cycle through a gradient
+while its button is being dragged. The gradient takes the same colours and
+colour spaces as Niri's `active-gradient`, so you can copy the one from your
+focus ring or border:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "drag_indicator_gradient": {
+      "from": "#a0a",
+      "to": "#0ec",
+      "in": "oklch decreasing hue",
+      "cycle_ms": 2000,
+      "fade_ms": 250,
+    },
+  },
+}
+```
+
+`in` can be `srgb` (the default), `srgb-linear`, `oklab`, or `oklch` followed by
+`shorter hue`, `longer hue`, `increasing hue` or `decreasing hue`. `cycle_ms` is
+how long one full cycle of the colours takes, and `fade_ms` how long the
+gradient takes to spread out from the middle of the pill when a drag starts, and
+to shrink back into it afterwards. The pill keeps the
+shape your stylesheet gives it; only its colour is replaced.
+
 ### Multiple outputs
 
 By default, the taskbar will only show applications running on the same output
@@ -245,6 +299,24 @@ underneath the focus pill where they overlap:
   background-color: rgba(0, 240, 240, 0.35);
 }
 ```
+
+With both pills turned on, the hover pill stays out from under the focused
+button. Instead, the focus pill itself changes while its button is hovered: it
+grows to `focus_indicator_hover_height` pixels thick (by default, 2 more than
+`focus_indicator_height`) and fades into the `focus-hover` class, so it can
+change colour or width too:
+
+```css
+.niri-taskbar .indicator.focus-hover {
+  background-color: #aa00aa;
+  margin: 0 4px 2px 4px;
+}
+```
+
+The colour fades across in sRGB by default. Set `focus_indicator_hover_in` to
+any of the colour spaces `drag_indicator_gradient` takes (see above) to fade
+through a different one; `"oklch"`, for instance, takes cyan to magenta by way
+of blue and violet rather than through grey.
 
 A third pill marks windows that want attention. Unlike the other two it is not
 limited to one button, since any number of windows can be asking at once, and it
