@@ -17,6 +17,9 @@ async-stream = "0.3.6"
 bitflags = "2.10.0"
 freedesktop-icons = "0.4.0"
 futures = "0.3.31"
+# Only here to turn on Gtk 3.24's APIs for placing popups, like the stack flyout, in the gdk that
+# waybar-cffi brings in.
+gdk = { version = "0.18.2", features = ["v3_24"] }
 itertools = "0.14.0"
 linicon = "2.3.0"
 niri-ipc = "=26.4.0"

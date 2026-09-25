@@ -98,6 +98,70 @@ added.
 The easiest way to get the app ID for a window is to ask Niri with `niri msg
 windows`. Note that app IDs are case sensitive.
 
+### Collapsing stacked windows
+
+Niri columns can hold several windows stacked on top of each other. Set
+`column_grouping` to `"collapse"` to show each stack as a single button, like a
+grouped taskbar:
+
+```jsonc
+{
+  "cffi/niri-taskbar": {
+    // other settings
+    "column_grouping": "collapse",
+  },
+}
+```
+
+The button shows the stack's focused window, or whichever of its windows was
+focused last, so moving around the column with the keyboard changes which icon
+is on show. A card or two peek out from behind it, and a badge in its top
+corner says how many windows are in the stack. While the stack has focus, its
+cards take on the focus pill's colour, so the two read as one.
+
+Resting the pointer on it unfolds the stack: a panel fades in over the button
+and slides out to the right to show every window in the stack, starting with the
+one already on show. Its buttons work like the taskbar's: click to focus,
+middle-click to close, right-click for the window menu. Picking a window folds
+the stack back up and makes that window the one it shows, and moving the
+pointer away folds it up too. With `scroll_windows` on, scrolling through the
+taskbar counts each stack as a single stop, at the window it's showing, so the
+wheel moves column by column; while the pointer's over a stack, scrolling goes
+round that stack's windows instead.
+
+The panel floats over the bar rather than opening up the taskbar, so nothing
+shifts about when a stack opens. Its buttons sit in a row with the
+`niri-taskbar` class, so they pick up the same styling as the taskbar's, and the
+panel itself has the `stack-flyout` class. The cards and the badge are drawn
+rather than packed into the row, and styled through the `stack-card` and
+`stack-count` classes:
+
+```css
+/* The cards take their corners from the button; `color` is their edge. */
+.niri-taskbar .stack-card {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.28);
+}
+
+.niri-taskbar .stack-count {
+  background-color: rgba(255, 255, 255, 0.9);
+  color: #1e1e22;
+  border-radius: 999px;
+  padding: 0 2px;
+  font-weight: bold;
+}
+
+.stack-flyout {
+  background-color: rgba(30, 30, 34, 0.95);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+```
+
+Every button in a stack has the `stacked` class, and the one showing for a shut
+stack also has `stack-collapsed`. If a hidden window wants attention, the shown
+button gets `stack-urgent`, and the urgent pill shows under it.
+
 ### Clicking buttons
 
 Left-clicking a button focuses its window, and middle-clicking closes it. The

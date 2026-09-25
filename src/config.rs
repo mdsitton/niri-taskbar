@@ -57,6 +57,8 @@ pub struct Config {
     drag_reorder_slide_ms: u32,
     #[serde(default)]
     drag_indicator_gradient: Option<GradientConfig>,
+    #[serde(default)]
+    column_grouping: ColumnGrouping,
 }
 
 /// Which of the two widgets this module instance should render.
@@ -66,6 +68,17 @@ pub enum Mode {
     #[default]
     Taskbar,
     Workspaces,
+}
+
+/// How windows that share a Niri column are shown.
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnGrouping {
+    /// A button for every window, as though they had columns of their own.
+    #[default]
+    None,
+    /// One button for the column, which opens up to show the rest while it's hovered.
+    Collapse,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +247,10 @@ impl Config {
 
     pub fn drag_reorder(&self) -> bool {
         self.drag_reorder
+    }
+
+    pub fn column_grouping(&self) -> ColumnGrouping {
+        self.column_grouping
     }
 
     pub fn drag_reorder_slide_ms(&self) -> u32 {

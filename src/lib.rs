@@ -10,6 +10,7 @@ use std::{
 use button::Button;
 use config::{Config, Mode, ScrollScope};
 use error::Error;
+use group::Grouping;
 use indicator::{Indicator, Options as IndicatorOptions};
 use niri::{Snapshot, Window};
 use notify::EnrichedNotification;
@@ -34,6 +35,7 @@ mod button;
 mod config;
 mod error;
 mod gradient;
+mod group;
 mod icon;
 mod indicator;
 mod menu;
@@ -142,6 +144,12 @@ async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<glib::JoinHa
 #[derive(Default)]
 struct ScrollState {
     visible_window_ids: Vec<u64>,
+    /// The windows of the stack under the pointer, top first, which scrolling is kept to while
+    /// it's there.
+    stack_scope: Option<Vec<u64>>,
+    /// The focused window, which may not be in `visible_window_ids` when it's tucked away in a
+    /// stack.
+    focused: Option<u64>,
     current_idx: Option<usize>,
     smooth_vertical: f64,
     smooth_horizontal: f64,
@@ -308,6 +316,28 @@ fn handle_bar_scroll_event(
         return Propagation::Stop;
     }
 
+    // Over a stack, scrolling goes round its windows instead, so any of them is a flick away.
+    if let Some(scope) = scroll_state
+        .stack_scope
+        .clone()
+        .filter(|scope| !scope.is_empty())
+    {
+        let focused = scroll_state.focused;
+        let len = scope.len();
+        let next = match focused.and_then(|id| scope.iter().position(|w| *w == id)) {
+            Some(idx) if forward => (idx + 1) % len,
+            Some(idx) => (idx + len - 1) % len,
+            None => 0,
+        };
+        scroll_state.last_handled_event_time = event.time();
+        drop(scroll_state);
+
+        if let Err(e) = state.niri().activate_window(scope[next]) {
+            tracing::warn!(%e, id = scope[next], "error trying to activate window from stack scroll");
+        }
+        return Propagation::Stop;
+    }
+
     let target = match scroll_state.cycle_target(forward, wrap) {
         Some(target) => target,
         None => return Propagation::Stop,
@@ -365,12 +395,14 @@ struct Instance {
     outputs: output::Tracker,
     pages: BTreeMap<PageKey, Page>,
     reorder: Reorder,
+    grouping: Grouping,
     scroll_state: Arc<Mutex<ScrollState>>,
     state: State,
 }
 
 impl Instance {
     pub fn new(state: State, container: gtk::Stack, scroll_state: Arc<Mutex<ScrollState>>) -> Self {
+        let reorder = Reorder::new(state.clone());
         Self {
             buttons: Default::default(),
             current_idx: None,
@@ -378,7 +410,8 @@ impl Instance {
             outputs: output::Tracker::new(state.clone(), &container),
             container,
             pages: Default::default(),
-            reorder: Reorder::new(state.clone()),
+            grouping: Grouping::new(&state, reorder.clone(), scroll_state.clone()),
+            reorder,
             scroll_state,
             state,
         }
@@ -398,6 +431,7 @@ impl Instance {
                     self.process_notification(notification).await;
                     // Marking a button urgent doesn't go through a snapshot, so the indicators
                     // need telling that something changed.
+                    self.grouping.update_urgency();
                     self.refresh_indicators();
                 }
                 Event::WindowSnapshot(windows) => {
@@ -607,12 +641,20 @@ impl Instance {
         let mut placements = HashMap::new();
         let dragging = self.reorder.is_dragging();
 
-        for (order, window) in snapshot
+        // Stacked windows may want to sit in a different order to the one Niri has them in.
+        let niri_order: Vec<&Window> = snapshot
             .windows
             .iter()
             .filter(|window| filter.should_show(window.output().unwrap_or_default()))
+            .collect();
+        let niri_index: HashMap<u64, usize> = niri_order
+            .iter()
             .enumerate()
-        {
+            .map(|(i, window)| (window.id, i))
+            .collect();
+        let windows = self.grouping.order(niri_order);
+
+        for (order, window) in windows.iter().copied().enumerate() {
             let key = if active_workspace_only {
                 PageKey::Workspace(window.workspace().id)
             } else {
@@ -644,6 +686,7 @@ impl Instance {
                 Entry::Vacant(entry) => {
                     let button = Button::new(&self.state, window);
                     self.reorder.attach(&button, window.id);
+                    self.grouping.attach(button.widget(), window.id);
 
                     // Implicitly adding the button widget to the page as we create it simplifies
                     // reordering, since it means we can just do it as we go.
@@ -715,6 +758,13 @@ impl Instance {
         // won't switch to a child that isn't visible.
         self.container.show_all();
 
+        // Which is why stacks have to hide the windows they aren't showing afterwards.
+        self.grouping.apply(&windows, |id| {
+            self.buttons
+                .get(&id)
+                .map(|slot| slot.button.widget().clone())
+        });
+
         // Switch pages, sliding in the same direction Niri moves its workspaces.
         let name = target.name();
         let page_changed = self.container.visible_child_name().as_deref() != Some(name.as_str());
@@ -747,8 +797,21 @@ impl Instance {
         // Update the bar-wide scroll state.
         let mut scroll_state = self.scroll_state.lock().expect("scroll state lock");
         let previous_idx = scroll_state.current_idx;
+        // Scrolling goes through the windows in Niri's order rather than the buttons', which a
+        // stack reshuffles as focus moves around it: going by the buttons, scrolling onto a
+        // stack's second window would bring it to the front, and the next step would land back
+        // on the first, round and round.
+        visible_window_ids.sort_by_key(|id| niri_index.get(id).copied().unwrap_or(usize::MAX));
+
+        // A stack takes up a single stop, at the window it's showing, so a flick of the wheel
+        // carries on to the next column rather than climbing through the stack a window at a
+        // time. Focus somewhere in a stack counts as being at that stop.
+        visible_window_ids.retain(|id| self.grouping.scroll_stop(*id) == *id);
+        let focused_stop = focused_window_id.map(|id| self.grouping.scroll_stop(id));
+
         scroll_state.visible_window_ids = visible_window_ids;
-        scroll_state.current_idx = focused_window_id
+        scroll_state.focused = focused_window_id;
+        scroll_state.current_idx = focused_stop
             .and_then(|id| {
                 scroll_state
                     .visible_window_ids
@@ -784,30 +847,16 @@ impl Instance {
 
         // This has to come before the indicator, so the pills get drawn over the dragged button.
         self.reorder.watch_row(&row);
+        self.grouping.watch_row(&row);
 
         let config = self.state.config();
-        let indicator =
-            if config.focus_indicator() || config.hover_indicator() || config.urgent_indicator() {
-                Some(Rc::new(Indicator::new(
-                    &row,
-                    IndicatorOptions {
-                        focus: config.focus_indicator(),
-                        focus_height: config.focus_indicator_height(),
-                        focus_hover_height: config.focus_indicator_hover_height(),
-                        focus_hover_space: config.focus_indicator_hover_space(),
-                        focus_ms: config.focus_indicator_ms(),
-                        drag_gradient: config.drag_indicator_gradient(),
-                        hover: config.hover_indicator(),
-                        hover_height: config.hover_indicator_height(),
-                        hover_ms: config.hover_indicator_ms(),
-                        urgent: config.urgent_indicator(),
-                        urgent_height: config.urgent_indicator_height(),
-                        urgent_pulse_ms: config.urgent_indicator_pulse_ms(),
-                    },
-                )))
-            } else {
-                None
-            };
+        let options = IndicatorOptions {
+            drag_gradient: config.drag_indicator_gradient(),
+            ..IndicatorOptions::from_config(config)
+        };
+        let indicator = options
+            .any()
+            .then(|| Rc::new(Indicator::new(&row, options)));
 
         row.show();
         self.container.add_named(&row, &key.name());

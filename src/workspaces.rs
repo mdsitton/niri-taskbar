@@ -41,26 +41,9 @@ pub struct Instance {
 
 impl Instance {
     pub fn new(state: State, container: gtk::Box) -> Self {
-        let options = {
-            let config = state.config();
+        let options = IndicatorOptions::from_config(state.config());
 
-            IndicatorOptions {
-                focus: config.focus_indicator(),
-                focus_height: config.focus_indicator_height(),
-                focus_hover_height: config.focus_indicator_hover_height(),
-                focus_hover_space: config.focus_indicator_hover_space(),
-                focus_ms: config.focus_indicator_ms(),
-                drag_gradient: None,
-                hover: config.hover_indicator(),
-                hover_height: config.hover_indicator_height(),
-                hover_ms: config.hover_indicator_ms(),
-                urgent: config.urgent_indicator(),
-                urgent_height: config.urgent_indicator_height(),
-                urgent_pulse_ms: config.urgent_indicator_pulse_ms(),
-            }
-        };
-
-        let indicator = if options.focus || options.hover || options.urgent {
+        let indicator = if options.any() {
             Some(Rc::new(Indicator::new(&container, options)))
         } else {
             None

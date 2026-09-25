@@ -412,7 +412,11 @@ impl Inner {
                     match spans.last_mut() {
                         Some(span) if span.column == column => {
                             span.last = rest.len();
-                            span.right = right;
+                            // A window hidden in a collapsed stack has no real place in the row,
+                            // so it only counts towards the stack's order, not its extent.
+                            if child.is_visible() {
+                                span.right = right;
+                            }
                         }
                         _ => spans.push(Span {
                             column,

@@ -971,6 +971,7 @@ dependencies = [
  "bitflags",
  "freedesktop-icons",
  "futures",
+ "gdk",
  "itertools",
  "linicon",
  "niri-ipc",

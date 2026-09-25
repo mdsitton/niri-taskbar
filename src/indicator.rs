@@ -12,7 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::gradient::{Gradient, Space};
+use crate::{
+    config::Config,
+    gradient::{Gradient, Space},
+};
 use waybar_cffi::gtk::{
     self as gtk, CssProvider, StateFlags, StyleContext, cairo,
     glib::{ControlFlow, SignalHandlerId, Value, object::Cast, object::ObjectExt, value::ToValue},
@@ -92,6 +95,32 @@ pub struct Options {
     pub urgent: bool,
     pub urgent_height: u32,
     pub urgent_pulse_ms: u32,
+}
+
+impl Options {
+    /// The options from the configuration, without the drag gradient, which only applies where
+    /// buttons can be dragged.
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            focus: config.focus_indicator(),
+            focus_height: config.focus_indicator_height(),
+            focus_hover_height: config.focus_indicator_hover_height(),
+            focus_hover_space: config.focus_indicator_hover_space(),
+            focus_ms: config.focus_indicator_ms(),
+            drag_gradient: None,
+            hover: config.hover_indicator(),
+            hover_height: config.hover_indicator_height(),
+            hover_ms: config.hover_indicator_ms(),
+            urgent: config.urgent_indicator(),
+            urgent_height: config.urgent_indicator_height(),
+            urgent_pulse_ms: config.urgent_indicator_pulse_ms(),
+        }
+    }
+
+    /// Whether any of the pills is turned on.
+    pub fn any(&self) -> bool {
+        self.focus || self.hover || self.urgent
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -720,7 +749,7 @@ fn draw_urgent(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context) {
         let Ok(button) = child.downcast::<gtk::Button>() else {
             continue;
         };
-        if !button.style_context().has_class("urgent") {
+        if !is_urgent(&button) {
             continue;
         }
 
@@ -744,12 +773,19 @@ fn draw_urgent(inner: &Rc<Inner>, row: &gtk::Box, cr: &cairo::Context) {
     }
 }
 
+/// Whether a button wants attention, either for its own window or, for a collapsed stack, for one
+/// of the windows hidden behind it.
+fn is_urgent(button: &gtk::Button) -> bool {
+    let context = button.style_context();
+    context.has_class("urgent") || context.has_class("stack-urgent")
+}
+
 /// Whether any button in the row is currently asking for attention.
 fn has_urgent(row: &gtk::Box) -> bool {
     row.children().into_iter().any(|child| {
         child
             .downcast::<gtk::Button>()
-            .is_ok_and(|button| button.style_context().has_class("urgent"))
+            .is_ok_and(|button| is_urgent(&button))
     })
 }
 
