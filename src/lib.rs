@@ -35,6 +35,7 @@ mod error;
 mod gradient;
 mod icon;
 mod indicator;
+mod menu;
 mod niri;
 mod notify;
 mod output;

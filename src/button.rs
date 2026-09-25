@@ -5,14 +5,17 @@ use std::{
     rc::Rc,
 };
 
+use niri_ipc::Action;
 use waybar_cffi::gtk::{
     self as gtk, Border, CssProvider, IconLookupFlags, IconSize, IconTheme, ReliefStyle,
     StateFlags,
+    gdk::EventType,
     gdk_pixbuf::Pixbuf,
+    glib::Propagation,
     prelude::{ButtonExt, CssProviderExt, GdkPixbufExt, IconThemeExt, StyleContextExt, WidgetExt},
 };
 
-use crate::state::State;
+use crate::{menu, state::State};
 
 /// A taskbar button.
 pub struct Button {
@@ -189,6 +192,44 @@ impl Button {
                 tracing::warn!(%e, id = window_id, "error trying to activate window");
             }
         });
+
+        // Gtk's own button handling only looks at the primary button, so the other two are ours.
+        // Right-click opens the window menu straight away, as menus do.
+        let state = self.state.clone();
+        self.button
+            .connect_button_press_event(move |button, event| {
+                if event.button() == 3 && event.event_type() == EventType::ButtonPress {
+                    menu::popup(&state, button, window_id, event);
+                    return Propagation::Stop;
+                }
+                Propagation::Proceed
+            });
+
+        // Middle-click closes the window, but only on release and only if the pointer is still
+        // over the button, so sliding off is a way out of a close you didn't mean.
+        let state = self.state.clone();
+        self.button
+            .connect_button_release_event(move |button, event| {
+                if event.button() != 2 {
+                    return Propagation::Proceed;
+                }
+
+                let (x, y) = event.position();
+                let size = button.allocation();
+                if x >= 0.0
+                    && y >= 0.0
+                    && x < f64::from(size.width())
+                    && y < f64::from(size.height())
+                {
+                    let close = Action::CloseWindow {
+                        id: Some(window_id),
+                    };
+                    if let Err(e) = state.niri().action(close) {
+                        tracing::warn!(%e, id = window_id, "error trying to close window");
+                    }
+                }
+                Propagation::Stop
+            });
     }
 
     #[tracing::instrument(level = "TRACE")]

@@ -43,6 +43,25 @@ impl Niri {
         reply::typed!(Handled, reply)
     }
 
+    /// Performs an action that doesn't reply with anything but whether it was handled.
+    #[tracing::instrument(level = "TRACE", err)]
+    pub fn action(&self, action: Action) -> Result<(), Error> {
+        let reply = request(Request::Action(action))?;
+        reply::typed!(Handled, reply)
+    }
+
+    /// Returns the current windows.
+    pub fn windows(&self) -> Result<Vec<niri_ipc::Window>, Error> {
+        let reply = request(Request::Windows)?;
+        reply::typed!(Windows, reply)
+    }
+
+    /// Returns the current workspaces.
+    pub fn workspaces(&self) -> Result<Vec<niri_ipc::Workspace>, Error> {
+        let reply = request(Request::Workspaces)?;
+        reply::typed!(Workspaces, reply)
+    }
+
     /// Returns the current outputs.
     pub fn outputs(&self) -> Result<HashMap<String, Output>, Error> {
         let reply = request(Request::Outputs)?;

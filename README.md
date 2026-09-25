@@ -98,6 +98,19 @@ added.
 The easiest way to get the app ID for a window is to ask Niri with `niri msg
 windows`. Note that app IDs are case sensitive.
 
+### Clicking buttons
+
+Left-clicking a button focuses its window, and middle-clicking closes it. The
+close happens when the button is released, and only if the pointer is still
+over it, so sliding off first cancels it.
+
+Right-clicking opens a menu for the window, with options to float or tile it,
+fullscreen it, maximize its column, stack it into the column to its left or
+right (or take it back out of a stack it's in, or cycle the windows in that
+stack down a slot each), move it to another workspace or monitor, and close
+it. The menu is an ordinary GTK menu, so it takes Waybar's `menu` and
+`menuitem` styling like the tray's menus do.
+
 ### Scrolling anywhere on the bar to cycle windows
 
 You can enable `scroll_windows` to cycle through visible taskbar windows with
