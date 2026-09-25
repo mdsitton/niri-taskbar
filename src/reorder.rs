@@ -55,6 +55,9 @@ struct Drag {
     start_root: f64,
     /// Where the button's slot started out, which it floats relative to.
     origin: f64,
+    /// The buttons being dragged: the grabbed one and any others in the same column, which all
+    /// move together, in row order.
+    group: Vec<gtk::Widget>,
     /// Whether the pointer has moved far enough for this to count as a drag rather than a click.
     active: bool,
     /// The column index we last asked Niri to move the column to.
@@ -201,6 +204,7 @@ impl Inner {
                 start: position,
                 start_root: root_x,
                 origin: 0.0,
+                group: Vec::new(),
                 active: false,
                 requested: column,
                 failed: !focused,
@@ -238,7 +242,17 @@ impl Inner {
 
             drag.active = true;
             self.dragging.set(Some(drag.window));
-            button.style_context().add_class("dragging");
+
+            // A column moves as a whole, so every window sharing it comes along for the ride.
+            drag.group = row_of(button)
+                .map(|row| self.column_buttons(&row, drag.window))
+                .unwrap_or_default();
+            if drag.group.is_empty() {
+                drag.group.push(button.clone().upcast());
+            }
+            for child in drag.group.iter() {
+                child.style_context().add_class("dragging");
+            }
 
             // Whatever was hovered when the drag started doesn't get a state change to trip the
             // handler above, so clear it here.
@@ -262,7 +276,7 @@ impl Inner {
         let widget = button.upcast_ref::<gtk::Widget>();
         let centre = match self.slide_for(&row) {
             Some(slide) => {
-                let x = slide.float(widget, drag.origin + root_x - drag.start_root);
+                let x = slide.float(widget, &drag.group, drag.origin + root_x - drag.start_root);
                 x + f64::from(slide.slot(widget).width()) / 2.0
             }
             None => f64::from(button.allocation().x()) + position.0,
@@ -293,7 +307,9 @@ impl Inner {
         }
 
         self.dragging.set(None);
-        button.style_context().remove_class("dragging");
+        for child in drag.group.iter() {
+            child.style_context().remove_class("dragging");
+        }
         if let Some(slide) = row_of(button).and_then(|row| self.slide_for(&row)) {
             slide.finish();
         }
@@ -321,13 +337,35 @@ impl Inner {
         }
 
         self.dragging.set(None);
-        button.style_context().remove_class("dragging");
+        for child in drag.group.iter() {
+            child.style_context().remove_class("dragging");
+        }
         if let Some(row) = row_of(button) {
             if let Some(slide) = self.slide_for(&row) {
                 slide.finish();
             }
             self.restore(&row);
         }
+    }
+
+    /// The buttons in the row for every window in the same column as the given one, in row order.
+    fn column_buttons(&self, row: &gtk::Box, window: u64) -> Vec<gtk::Widget> {
+        let placements = self.placements.borrow();
+        let Some(dragged) = placements.get(&window) else {
+            return Vec::new();
+        };
+        let (workspace, column) = (dragged.workspace, dragged.column);
+
+        row.children()
+            .into_iter()
+            .filter(|child| {
+                placements.values().any(|placement| {
+                    placement.button.upcast_ref::<gtk::Widget>() == child
+                        && placement.workspace == workspace
+                        && placement.column == column
+                })
+            })
+            .collect()
     }
 
     /// Moves the dragged column's buttons to wherever the pointer is among the other columns on

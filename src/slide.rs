@@ -1,9 +1,10 @@
 //! Animated movement for the buttons in a row while they're being dragged around.
 //!
 //! A [`gtk::Box`] only knows how to put its children in their slots, so this sits on top of it:
-//! after every allocation the box makes, it moves the dragged button to wherever the pointer has
-//! it, which leaves its slot empty, and slides any button whose slot changed from where it was
-//! showing to where it now belongs. The buttons are moved for real rather than drawn somewhere
+//! after every allocation the box makes, it moves the dragged buttons to wherever the pointer has
+//! them, which leaves their slots empty, and slides any button whose slot changed from where it
+//! was showing to where it now belongs. Dragging a window that shares its column with others
+//! drags them all, gathered up behind it like a pile of cards. The buttons are moved for real rather than drawn somewhere
 //! else, so the pills, which follow allocations, keep up of their own accord, and the dragged
 //! button keeps its pointer grab.
 
@@ -29,12 +30,13 @@ pub struct Slide {
     slots: RefCell<HashMap<gtk::Widget, gtk::Allocation>>,
     /// Children on their way from one slot to another.
     moving: RefCell<HashMap<gtk::Widget, Move>>,
-    /// The button being dragged, and the x position the pointer has it at.
-    floating: RefCell<Option<(gtk::Widget, f64)>>,
-    /// The button drawn over the others: the dragged one, until it's back in its slot.
-    raised: RefCell<Option<gtk::Widget>>,
-    /// Set while the raised button is being drawn on top, which is the only time it's drawn at
-    /// all: drawing it in its usual turn as well would double up anything translucent.
+    /// The buttons being dragged, if any.
+    floating: RefCell<Option<Pile>>,
+    /// The buttons drawn over the others, bottom first: the dragged ones, until they're back in
+    /// their slots.
+    raised: RefCell<Vec<gtk::Widget>>,
+    /// Set while the raised buttons are being drawn on top, which is the only time they're drawn
+    /// at all: drawing them in their usual turn as well would double up anything translucent.
     drawing_raised: Cell<bool>,
     /// Whether slot changes should slide rather than jump, which is only while a drag is on and
     /// for a moment after, so the rest of the time the row behaves as it always has.
@@ -46,6 +48,25 @@ pub struct Slide {
 struct Move {
     from: f64,
     started: Instant,
+}
+
+/// How far behind each other the buttons in a dragged pile sit.
+const PILE_STEP: f64 = 5.0;
+
+/// The buttons being dragged: the one the pointer has, and any sharing its column, each offset
+/// from where the pointer has the pile.
+struct Pile {
+    x: f64,
+    cards: Vec<(gtk::Widget, f64)>,
+}
+
+impl Pile {
+    fn offset(&self, child: &gtk::Widget) -> Option<f64> {
+        self.cards
+            .iter()
+            .find(|(card, _)| card == child)
+            .map(|(_, offset)| *offset)
+    }
 }
 
 impl Slide {
@@ -82,12 +103,14 @@ impl Slide {
                 let row = values.first().and_then(|v| v.get::<gtk::Box>().ok());
                 let cr = values.get(1).and_then(|v| v.get::<cairo::Context>().ok());
                 let raised = slide.raised.borrow().clone();
-                if let (Some(row), Some(cr), Some(raised)) = (row, cr, raised) {
-                    if raised.parent().as_ref() == Some(row.upcast_ref()) {
-                        slide.drawing_raised.set(true);
-                        row.propagate_draw(&raised, &cr);
-                        slide.drawing_raised.set(false);
+                if let (Some(row), Some(cr)) = (row, cr) {
+                    slide.drawing_raised.set(true);
+                    for child in raised.iter() {
+                        if child.parent().as_ref() == Some(row.upcast_ref()) {
+                            row.propagate_draw(child, &cr);
+                        }
                     }
+                    slide.drawing_raised.set(false);
                 }
                 Some(false.to_value())
             }
@@ -104,7 +127,7 @@ impl Slide {
     /// Returns true if the given child should skip drawing itself right now, because it's raised
     /// and will be drawn on top of the others instead.
     pub fn hides(&self, child: &gtk::Widget) -> bool {
-        !self.drawing_raised.get() && self.raised.borrow().as_ref() == Some(child)
+        !self.drawing_raised.get() && self.raised.borrow().contains(child)
     }
 
     /// Returns true if the row this manages is still around.
@@ -126,21 +149,57 @@ impl Slide {
         self.animate.set(true);
     }
 
-    /// Floats the given button at `x`, kept within the row, returning where it actually ended up.
-    pub fn float(&self, button: &gtk::Widget, x: f64) -> f64 {
-        let x = self.clamp(button, x);
-        *self.floating.borrow_mut() = Some((button.clone(), x));
-        *self.raised.borrow_mut() = Some(button.clone());
-        self.moving.borrow_mut().remove(button);
+    /// Floats the grabbed button at `x`, kept within the row, along with the rest of `group`
+    /// (the buttons sharing its column, in row order), returning where the grabbed button actually
+    /// ended up.
+    ///
+    /// The first call of a drag gathers the rest of the group up behind the grabbed button, which
+    /// they glide over to; later calls just move the pile.
+    pub fn float(&self, grabbed: &gtk::Widget, group: &[gtk::Widget], x: f64) -> f64 {
+        if self.floating.borrow().is_none() {
+            // The others fan out behind the grabbed button in their usual order, and are drawn
+            // furthest first so the grabbed one ends up on top.
+            let others: Vec<_> = group.iter().filter(|child| *child != grabbed).collect();
+            let mut cards = vec![(grabbed.clone(), 0.0)];
+            let now = Instant::now();
+            let mut moving = self.moving.borrow_mut();
+            for (i, child) in others.iter().enumerate() {
+                cards.push(((*child).clone(), PILE_STEP * (i + 1) as f64));
+                moving.insert(
+                    (*child).clone(),
+                    Move {
+                        from: f64::from(child.allocation().x()),
+                        started: now,
+                    },
+                );
+            }
+            moving.remove(grabbed);
+            drop(moving);
 
+            *self.raised.borrow_mut() =
+                cards.iter().rev().map(|(child, _)| child.clone()).collect();
+            *self.floating.borrow_mut() = Some(Pile { x, cards });
+        }
+
+        let x = self.clamp(grabbed, x);
+        let cards: Vec<_> = {
+            let mut floating = self.floating.borrow_mut();
+            let pile = floating.as_mut().expect("pile was just set");
+            pile.x = x;
+            pile.cards.iter().map(|(child, _)| child.clone()).collect()
+        };
+
+        for child in cards.iter() {
+            self.place(child);
+        }
         if let Some(row) = self.row.upgrade() {
-            self.place(button);
             row.queue_draw();
         }
+        self.tick();
         x
     }
 
-    /// Ends a drag, sliding the floating button back into its slot. Sliding stays on for a
+    /// Ends a drag, sliding the floating buttons back into their slots. Sliding stays on for a
     /// little while after, so the row catching up with Niri afterwards is animated too.
     pub fn finish(&self) {
         self.animate.set(false);
@@ -148,14 +207,14 @@ impl Slide {
             Instant::now() + self.duration + Duration::from_millis(500),
         ));
 
-        if let Some((button, x)) = self.floating.borrow_mut().take() {
-            self.moving.borrow_mut().insert(
-                button,
-                Move {
-                    from: x,
-                    started: Instant::now(),
-                },
-            );
+        if let Some(pile) = self.floating.borrow_mut().take() {
+            let now = Instant::now();
+            let mut moving = self.moving.borrow_mut();
+            for (child, _) in pile.cards {
+                // Start from wherever it's showing, which may be partway into the pile.
+                let from = f64::from(child.allocation().x());
+                moving.insert(child, Move { from, started: now });
+            }
         }
         self.tick();
     }
@@ -182,7 +241,11 @@ impl Slide {
                 if !animate || old.x() == slot.x() {
                     continue;
                 }
-                if floating.as_ref().is_some_and(|(button, _)| button == child) {
+                // Floating buttons go where the pile is, not to their slots.
+                if floating
+                    .as_ref()
+                    .is_some_and(|pile| pile.offset(child).is_some())
+                {
                     continue;
                 }
 
@@ -190,7 +253,7 @@ impl Slide {
                 // already on the move.
                 let from = moving
                     .get(child)
-                    .map_or(f64::from(old.x()), |m| self.position(m, old.x()));
+                    .map_or(f64::from(old.x()), |m| self.position(m, f64::from(old.x())));
                 moving.insert(child.clone(), Move { from, started: now });
             }
 
@@ -207,24 +270,26 @@ impl Slide {
     }
 
     /// Where a moving child is right now, on its way to `to`.
-    fn position(&self, m: &Move, to: i32) -> f64 {
+    fn position(&self, m: &Move, to: f64) -> f64 {
         let t = if self.duration.is_zero() {
             1.0
         } else {
             ease(m.started.elapsed().as_secs_f64() / self.duration.as_secs_f64())
         };
-        m.from + (f64::from(to) - m.from) * t
+        m.from + (to - m.from) * t
     }
 
     /// Puts a child wherever it should be showing right now, if that isn't where it already is.
     fn place(&self, child: &gtk::Widget) {
         let slot = self.slot(child);
-        let x = match &*self.floating.borrow() {
-            Some((button, x)) if button == child => *x,
-            _ => match self.moving.borrow().get(child) {
-                Some(m) => self.position(m, slot.x()),
-                None => f64::from(slot.x()),
-            },
+        let target = match &*self.floating.borrow() {
+            Some(pile) => pile.offset(child).map(|offset| pile.x + offset),
+            None => None,
+        }
+        .unwrap_or(f64::from(slot.x()));
+        let x = match self.moving.borrow().get(child) {
+            Some(m) => self.position(m, target),
+            None => target,
         };
 
         let allocation =
@@ -237,13 +302,25 @@ impl Slide {
         }
     }
 
+    /// Keeps the pile, headed by `child`, within the row.
     fn clamp(&self, child: &gtk::Widget, x: f64) -> f64 {
         let Some(row) = self.row.upgrade() else {
             return x;
         };
+        let spread = self
+            .floating
+            .borrow()
+            .as_ref()
+            .and_then(|pile| {
+                pile.cards
+                    .iter()
+                    .map(|(_, offset)| *offset)
+                    .reduce(f64::max)
+            })
+            .unwrap_or(0.0);
         let row = row.allocation();
         let min = f64::from(row.x());
-        let max = f64::from(row.x() + row.width() - self.slot(child).width());
+        let max = f64::from(row.x() + row.width() - self.slot(child).width()) - spread;
         x.clamp(min, max.max(min))
     }
 
@@ -263,20 +340,19 @@ impl Slide {
                 slide.place(child);
             }
 
-            // Anything that's arrived stops moving, and once the dragged button is home it no
-            // longer needs drawing over the others.
+            // Anything that's arrived stops moving, and once the dragged buttons are home they no
+            // longer need drawing over the others.
             let duration = slide.duration;
             slide
                 .moving
                 .borrow_mut()
                 .retain(|_, m| m.started.elapsed() < duration);
             let moving = slide.moving.borrow();
-            let dragging = slide.floating.borrow().is_some();
-            {
-                let mut raised = slide.raised.borrow_mut();
-                if !dragging && raised.as_ref().is_some_and(|r| !moving.contains_key(r)) {
-                    *raised = None;
-                }
+            if slide.floating.borrow().is_none() {
+                slide
+                    .raised
+                    .borrow_mut()
+                    .retain(|child| moving.contains_key(child));
             }
             for child in children.iter().filter(|c| !moving.contains_key(*c)) {
                 slide.place(child);
