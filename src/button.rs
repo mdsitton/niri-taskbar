@@ -203,18 +203,22 @@ impl Button {
                 // then it's the first draw, and we have no choice but to draw.
                 let mut must_redraw = button.image().is_none();
 
-                // Otherwise, let's check if the size allocation has changed since the last time
-                // this was called.
+                // Otherwise, let's check if the size has changed since the last time this was
+                // called. Only the size matters to the icon: buttons get moved about without
+                // changing size while they're dragged and slid along the row, and reloading the
+                // icon (which resizes the button, and so re-lays out the row) on every frame of
+                // that makes a mess of the animation.
+                let size = (allocation.width(), allocation.height());
                 if !must_redraw {
                     if let Some(last_size) = last_size.take() {
-                        if &last_size != allocation {
+                        if last_size != size {
                             must_redraw = true;
                         }
                     } else {
                         must_redraw = true;
                     }
 
-                    last_size.replace(Some(*allocation));
+                    last_size.replace(Some(size));
                 }
 
                 if must_redraw {
