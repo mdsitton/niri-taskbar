@@ -140,8 +140,11 @@ to move its window's column in Niri's scrolling layout:
 }
 ```
 
-The window is focused as soon as the button is pressed, and its column moves in
-Niri as it passes each of the other columns. A few things to be aware of:
+The window is focused as soon as the button is pressed. The button then floats
+under the pointer, leaving a gap where it was, and the other buttons slide out of
+its way as it passes them, with the column moving in Niri each time. On release
+it slides back down into its gap. `drag_reorder_slide_ms` (150 by default) sets
+how long the slides take; 0 makes them jump. A few things to be aware of:
 
 - Since the window is focused on press rather than on release, this also
   changes plain clicks to focus on press.

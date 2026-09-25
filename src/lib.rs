@@ -40,6 +40,7 @@ mod notify;
 mod output;
 mod process;
 mod reorder;
+mod slide;
 mod state;
 mod workspaces;
 
@@ -778,6 +779,9 @@ impl Instance {
         }
 
         let row = gtk::Box::new(Orientation::Horizontal, 0);
+
+        // This has to come before the indicator, so the pills get drawn over the dragged button.
+        self.reorder.watch_row(&row);
 
         let config = self.state.config();
         let indicator =

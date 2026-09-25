@@ -2,6 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::{Rc, Weak},
+    time::Duration,
 };
 
 use waybar_cffi::gtk::{
@@ -11,7 +12,7 @@ use waybar_cffi::gtk::{
     prelude::{BoxExt, ContainerExt, StyleContextExt, WidgetExt, WidgetExtManual},
 };
 
-use crate::{button::Button, state::State};
+use crate::{button::Button, slide::Slide, state::State};
 
 /// Where a window's button sits, as far as dragging it around is concerned.
 pub struct Placement {
@@ -27,8 +28,9 @@ pub struct Placement {
 
 /// Lets buttons be dragged left and right along the row to move their window's column in Niri.
 ///
-/// The row is rearranged live while dragging, and Niri is asked to move the column every time it
-/// passes another one, so the windows follow along in real time.
+/// The dragged button floats under the pointer, leaving a gap where it was, and the others slide
+/// out of its way as it passes them. Niri is asked to move the column every time it does, so the
+/// windows follow along in real time.
 #[derive(Clone)]
 pub struct Reorder(Rc<Inner>);
 
@@ -39,6 +41,8 @@ struct Inner {
     /// The window whose button is being dragged, kept apart from `drag` so it can be checked from
     /// signal handlers that might fire while `drag` is borrowed.
     dragging: Cell<Option<u64>>,
+    /// The animation for each row, which outlive their rows until the next one comes along.
+    rows: RefCell<Vec<Rc<Slide>>>,
 }
 
 struct Drag {
@@ -46,6 +50,11 @@ struct Drag {
     workspace: u64,
     /// Where the press happened, relative to the button.
     start: (f64, f64),
+    /// The pointer's x position at the press, in root coordinates, which unlike the event
+    /// positions don't move along with the button.
+    start_root: f64,
+    /// Where the button's slot started out, which it floats relative to.
+    origin: f64,
     /// Whether the pointer has moved far enough for this to count as a drag rather than a click.
     active: bool,
     /// The column index we last asked Niri to move the column to.
@@ -61,7 +70,22 @@ impl Reorder {
             placements: Default::default(),
             drag: Default::default(),
             dragging: Default::default(),
+            rows: Default::default(),
         }))
+    }
+
+    /// Animates the buttons in the given row as they're dragged about, if reordering is enabled.
+    /// This has to be called before anything else draws over the row.
+    pub fn watch_row(&self, row: &gtk::Box) {
+        let config = self.0.state.config();
+        if !config.drag_reorder() {
+            return;
+        }
+
+        let duration = Duration::from_millis(u64::from(config.drag_reorder_slide_ms()));
+        let mut rows = self.0.rows.borrow_mut();
+        rows.retain(|slide| slide.is_alive());
+        rows.push(Slide::new(row, duration));
     }
 
     /// Makes the given button draggable, if reordering is enabled.
@@ -81,7 +105,9 @@ impl Reorder {
             // window is already active by the time a drag gets going, so the click can go.
             let focused = event.button() == 1
                 && event.event_type() == EventType::ButtonPress
-                && with(&inner, |inner| inner.press(window_id, event.position()));
+                && with(&inner, |inner| {
+                    inner.press(window_id, event.position(), event.root().0)
+                });
             blocker.set(focused);
             Propagation::Proceed
         });
@@ -92,7 +118,7 @@ impl Reorder {
                 return Propagation::Proceed;
             }
             inner.upgrade().map_or(Propagation::Proceed, |inner| {
-                inner.motion(button, event.position())
+                inner.motion(button, event.position(), event.root().0)
             })
         });
 
@@ -111,6 +137,22 @@ impl Reorder {
             let dragging = with(&inner, |inner| inner.dragging.get());
             if dragging.is_some() && button.state_flags().contains(StateFlags::PRELIGHT) {
                 button.unset_state_flags(StateFlags::PRELIGHT);
+            }
+        });
+
+        // A floating button is drawn over the others after they're done, so it mustn't also draw
+        // in its usual turn. Stopping the signal here skips Gtk's own drawing of it.
+        let inner = Rc::downgrade(&self.0);
+        widget.connect_draw(move |button, _| {
+            let hidden = with(&inner, |inner| {
+                row_of(button)
+                    .and_then(|row| inner.slide_for(&row))
+                    .is_some_and(|slide| slide.hides(button.upcast_ref()))
+            });
+            if hidden {
+                Propagation::Stop
+            } else {
+                Propagation::Proceed
             }
         });
 
@@ -139,7 +181,7 @@ fn with<T: Default>(inner: &Weak<Inner>, f: impl FnOnce(&Inner) -> T) -> T {
 impl Inner {
     /// Focuses the window and gets ready for a possible drag, returning true if the window was
     /// focused.
-    fn press(&self, window: u64, position: (f64, f64)) -> bool {
+    fn press(&self, window: u64, position: (f64, f64), root_x: f64) -> bool {
         // This also gets the window ready to be moved, since Niri can only move the focused
         // column.
         let focused = match self.state.niri().activate_window(window) {
@@ -157,6 +199,8 @@ impl Inner {
                 window,
                 workspace: placement.workspace,
                 start: position,
+                start_root: root_x,
+                origin: 0.0,
                 active: false,
                 requested: column,
                 failed: !focused,
@@ -167,7 +211,15 @@ impl Inner {
         focused
     }
 
-    fn motion(&self, button: &gtk::Button, position: (f64, f64)) -> Propagation {
+    fn slide_for(&self, row: &gtk::Box) -> Option<Rc<Slide>> {
+        self.rows
+            .borrow()
+            .iter()
+            .find(|slide| slide.is_for(row))
+            .cloned()
+    }
+
+    fn motion(&self, button: &gtk::Button, position: (f64, f64), root_x: f64) -> Propagation {
         let mut drag = self.drag.borrow_mut();
         let Some(drag) = drag.as_mut() else {
             return Propagation::Proceed;
@@ -194,6 +246,10 @@ impl Inner {
                 for child in row.children() {
                     child.unset_state_flags(StateFlags::PRELIGHT);
                 }
+                if let Some(slide) = self.slide_for(&row) {
+                    drag.origin = f64::from(slide.slot(button.upcast_ref()).x());
+                    slide.start();
+                }
             }
         }
 
@@ -201,10 +257,17 @@ impl Inner {
             return Propagation::Stop;
         };
 
-        // Event positions are relative to the button, which moves as we rearrange the row, so
-        // work in the same space as the sibling allocations instead.
-        let x = f64::from(button.allocation().x()) + position.0;
-        let Some(target) = self.arrange(&row, drag, x) else {
+        // The button follows the pointer, and it's the middle of the button that decides where it
+        // would drop. Without the animation, the pointer itself stands in for that.
+        let widget = button.upcast_ref::<gtk::Widget>();
+        let centre = match self.slide_for(&row) {
+            Some(slide) => {
+                let x = slide.float(widget, drag.origin + root_x - drag.start_root);
+                x + f64::from(slide.slot(widget).width()) / 2.0
+            }
+            None => f64::from(button.allocation().x()) + position.0,
+        };
+        let Some(target) = self.arrange(&row, drag, centre) else {
             return Propagation::Stop;
         };
 
@@ -231,6 +294,9 @@ impl Inner {
 
         self.dragging.set(None);
         button.style_context().remove_class("dragging");
+        if let Some(slide) = row_of(button).and_then(|row| self.slide_for(&row)) {
+            slide.finish();
+        }
 
         // If Niri has already told us about the last move, line the row up with it now. Otherwise
         // the snapshot that's on its way will do that once it arrives.
@@ -257,6 +323,9 @@ impl Inner {
         self.dragging.set(None);
         button.style_context().remove_class("dragging");
         if let Some(row) = row_of(button) {
+            if let Some(slide) = self.slide_for(&row) {
+                slide.finish();
+            }
             self.restore(&row);
         }
     }
@@ -274,6 +343,7 @@ impl Inner {
 
         let placements = self.placements.borrow();
         let children = row.children();
+        let slide = self.slide_for(row);
 
         // Columns get renumbered as Niri moves them, so look up where the dragged window is now
         // rather than where it started: that way it always agrees with the other placements.
@@ -294,7 +364,11 @@ impl Inner {
             match column {
                 Some(column) if column == dragged_column => dragged.push(child.clone()),
                 Some(column) => {
-                    let alloc = child.allocation();
+                    // Go by where the button belongs rather than where it's showing, so one that's
+                    // still sliding over doesn't change its mind about where the drop lands.
+                    let alloc = slide
+                        .as_ref()
+                        .map_or_else(|| child.allocation(), |slide| slide.slot(child));
                     let left = f64::from(alloc.x());
                     let right = f64::from(alloc.x() + alloc.width());
                     match spans.last_mut() {

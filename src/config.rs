@@ -53,6 +53,8 @@ pub struct Config {
     scroll_reverse: bool,
     #[serde(default)]
     drag_reorder: bool,
+    #[serde(default = "default_drag_reorder_slide_ms")]
+    drag_reorder_slide_ms: u32,
     #[serde(default)]
     drag_indicator_gradient: Option<GradientConfig>,
 }
@@ -234,6 +236,10 @@ impl Config {
         self.drag_reorder
     }
 
+    pub fn drag_reorder_slide_ms(&self) -> u32 {
+        self.drag_reorder_slide_ms
+    }
+
     /// The colour space the focus pill fades between its usual and hovered colours in.
     pub fn focus_indicator_hover_space(&self) -> Space {
         let Some(space) = self.focus_indicator_hover_in.as_deref() else {
@@ -265,6 +271,10 @@ where
     D: Deserializer<'de>,
 {
     Regex::new(&String::deserialize(de)?).map_err(serde::de::Error::custom)
+}
+
+fn default_drag_reorder_slide_ms() -> u32 {
+    150
 }
 
 fn default_indicator_ms() -> u32 {
