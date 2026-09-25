@@ -111,6 +111,11 @@ stack down a slot each), move it to another workspace or monitor, and close
 it. The menu is an ordinary GTK menu, so it takes Waybar's `menu` and
 `menuitem` styling like the tray's menus do.
 
+Items that have a key binding in your Niri config show it alongside, so the menu
+doubles as a reminder of your shortcuts. The config is read each time the menu
+opens (from `$NIRI_CONFIG` or `~/.config/niri/config.kdl`, following any
+includes), so changes to it show up straight away.
+
 ### Scrolling anywhere on the bar to cycle windows
 
 You can enable `scroll_windows` to cycle through visible taskbar windows with

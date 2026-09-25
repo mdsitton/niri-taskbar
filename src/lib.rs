@@ -29,6 +29,7 @@ use waybar_cffi::{
     waybar_module,
 };
 
+mod binds;
 mod button;
 mod config;
 mod error;
