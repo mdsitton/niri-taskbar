@@ -283,15 +283,7 @@ impl Button {
                     // applied after the button is first rendered.
                     //
                     // That seems to be the price we have to pay, though, so here we are.
-                    let context = button.style_context();
-                    let border = context.border(StateFlags::NORMAL);
-                    let margin = context.margin(StateFlags::NORMAL);
-                    let padding = context.padding(StateFlags::NORMAL);
-
-                    let size = allocation.height()
-                        - border.vertical_size()
-                        - margin.vertical_size()
-                        - padding.vertical_size();
+                    let size = Self::icon_size(button, allocation.height());
 
                     // Now we know the size, we can actually load the image.
                     let image =
@@ -327,12 +319,31 @@ impl Button {
                     // Finally, we can set the button image. Doing this from the callback doesn't
                     // seem to work reliably for reasons I don't understand at all, but doing it
                     // from the main loop as soon as possible does. :shrug:
+                    //
+                    // By then, though, the button's styling may have changed under it, like a
+                    // collapsed stack making room for its cards, and an image sized for how it
+                    // was would be too big for it now, which would grow the bar for good. So
+                    // it's only set if it's still the right size: if not, whatever changed has
+                    // already asked for another.
                     let button = button.clone();
                     gtk::glib::source::idle_add_local_once(move || {
-                        button.set_image(Some(&image));
+                        if Self::icon_size(&button, button.allocated_height()) == size {
+                            button.set_image(Some(&image));
+                        }
                     });
                 }
             });
+    }
+
+    /// The size an icon has to be to fit in the button at the given height, once its styling has
+    /// had its say.
+    fn icon_size(button: &gtk::Button, height: i32) -> i32 {
+        let context = button.style_context();
+        let border = context.border(StateFlags::NORMAL);
+        let margin = context.margin(StateFlags::NORMAL);
+        let padding = context.padding(StateFlags::NORMAL);
+
+        height - border.vertical_size() - margin.vertical_size() - padding.vertical_size()
     }
 
     fn icon_image(
