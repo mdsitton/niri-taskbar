@@ -4,10 +4,18 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 use waybar_cffi::gtk::{
-    IconLookupFlags, IconTheme,
+    IconLookupFlags, IconTheme, Settings,
     gio::{AppInfo, DesktopAppInfo, FileIcon},
-    prelude::{AppInfoExt, Cast, FileExt, IconExt, IconThemeExt},
+    prelude::{AppInfoExt, Cast, FileExt, GtkSettingsExt, IconExt, IconThemeExt},
 };
+
+thread_local! {
+    /// The user's GTK icon theme, read once. Icons are only looked up from the GTK thread, when
+    /// buttons are created, so this is the same theme the rest of the bar is drawn with.
+    static THEME_NAME: Option<String> = Settings::default()
+        .and_then(|settings| settings.gtk_icon_theme_name())
+        .map(String::from);
+}
 
 /// A cache for taskbar icons.
 #[derive(Debug, Clone, Default)]
@@ -110,7 +118,18 @@ fn lookup_by_startup_wm_class(wm_class: &str) -> Option<PathBuf> {
 }
 
 fn lookup_icon(id: &str) -> Option<PathBuf> {
-    if let Some(path) = freedesktop_icons::lookup(id).with_size(512).find() {
+    // Without a theme, freedesktop-icons only looks in hicolor, where applications install their
+    // own icons, so the user's theme would never get a look in for anything that ships one. With
+    // it, the theme (and whatever it inherits from) comes first, and hicolor is still the
+    // fallback.
+    let found = THEME_NAME.with(|theme| {
+        let lookup = freedesktop_icons::lookup(id).with_size(512);
+        match theme {
+            Some(theme) => lookup.with_theme(theme).find(),
+            None => lookup.find(),
+        }
+    });
+    if let Some(path) = found {
         return Some(path);
     }
     if let Some(path) = linicon::lookup_icon(id)
